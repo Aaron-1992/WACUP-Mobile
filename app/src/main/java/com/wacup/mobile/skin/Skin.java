@@ -59,7 +59,8 @@ public final class Skin {
     public boolean isBase;
     public String name = "Winamp base skin";
 
-    private Skin() { }
+    /** Package-private: the built-in skin is built by BaseSkin. */
+    Skin() { }
 
     public static Skin base() {
         return BaseSkin.create();
