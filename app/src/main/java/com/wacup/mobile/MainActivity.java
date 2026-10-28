@@ -294,8 +294,36 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     @Override
-    public void onTrackMenu(int index) {
-        showMenu();
+    public void onTrackMenu(final int index) {
+        final Track track = engine.playlist().get(index);
+        if (track == null) return;
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(track.title)
+                .setItems(new String[]{"Play", "Remove from playlist", "Show file name"},
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int which) {
+                                if (which == 0) {
+                                    engine.playIndex(index);
+                                } else if (which == 1) {
+                                    boolean wasCurrent = index == engine.currentIndex();
+                                    engine.playlist().removeAt(index);
+                                    if (engine.playlist().size() == 0) {
+                                        engine.stop();
+                                        engine.setQueue(new java.util.ArrayList<Track>(), 0);
+                                    } else {
+                                        engine.setQueue(engine.playlist().tracks,
+                                                Math.max(0, Math.min(index, engine.playlist().size() - 1)));
+                                        if (!wasCurrent) return;
+                                    }
+                                    toast("Removed");
+                                } else {
+                                    toast(track.file.getAbsolutePath());
+                                }
+                                refreshWindows();
+                            }
+                        })
+                .show();
     }
 
     @Override

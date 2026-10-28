@@ -6,6 +6,9 @@ real media notification, real Bluetooth/lock-screen controls.
 
 Status: **0.1, first working skeleton.** Expect rough edges; see *What works* below.
 
+**Download the APK:** https://github.com/Aaron-1992/WACUP-Mobile/releases/download/apk-latest/app-debug.apk
+(rebuilt on every push by GitHub Actions)
+
 ## What works
 
 - Classic skin engine: `main.bmp`, `cbuttons.bmp`, `titlebar.bmp`, `numbers.bmp`,

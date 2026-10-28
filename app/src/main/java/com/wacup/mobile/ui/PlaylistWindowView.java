@@ -25,6 +25,7 @@ public class PlaylistWindowView extends SkinSurface {
     private int visibleRows = 6;
     private float scrollPx;
     private float downY;
+    private long downTime;
     private boolean dragging;
     private int pressedRow = -1;
 
@@ -212,6 +213,7 @@ public class PlaylistWindowView extends SkinSurface {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downY = event.getY();
+                downTime = System.currentTimeMillis();
                 dragging = false;
                 pressedRow = rowAt(y);
                 invalidate();
@@ -236,7 +238,14 @@ public class PlaylistWindowView extends SkinSurface {
                         callbacks.onMenu();
                     } else {
                         int row = rowAt(y);
-                        if (row >= 0 && callbacks != null) callbacks.onPlayTrack(row);
+                        boolean longPress = System.currentTimeMillis() - downTime > 500L;
+                        if (row >= 0 && callbacks != null) {
+                            if (longPress) {
+                                callbacks.onTrackMenu(row);
+                            } else {
+                                callbacks.onPlayTrack(row);
+                            }
+                        }
                     }
                 }
                 pressedRow = -1;
