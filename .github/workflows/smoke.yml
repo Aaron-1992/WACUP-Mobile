@@ -1,8 +1,7 @@
 name: smoke
 on:
-  workflow_dispatch:
   push:
-    branches: [arena-test-nothing]
+    branches: [arena/8cc0a29a-wacup-mobile]
 jobs:
   hello:
     runs-on: ubuntu-latest
