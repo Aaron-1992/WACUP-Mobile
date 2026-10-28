@@ -50,7 +50,7 @@ public class EqWindowView extends SkinSurface {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         setMeasuredDimension((int) Math.ceil(SkinLayout.EQ_W * scale),
-                Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.EQ_H) * scale));
+                (int) Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.EQ_H) * scale));
     }
 
     @Override

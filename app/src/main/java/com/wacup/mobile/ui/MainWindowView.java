@@ -99,7 +99,7 @@ public class MainWindowView extends SkinSurface {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         int w = (int) Math.ceil(SkinLayout.MAIN_W * scale);
-        int h = Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.MAIN_H) * scale);
+        int h = (int) Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.MAIN_H) * scale);
         setMeasuredDimension(w, h);
     }
 

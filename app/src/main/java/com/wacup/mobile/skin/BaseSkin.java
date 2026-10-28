@@ -105,7 +105,7 @@ final class BaseSkin {
     private static Bitmap drawCButtons() {
         Bitmap bmp = Bitmap.createBitmap(136, 36, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(bmp);
-        String[] glyphs = {"\u23EE", "\u25B6", "\u23F8", "\u23F9", "\u23ED", "\u23CF"};
+        String[] glyphs = {"\u23EE", "\u25B6", "\u23F8", "\u23F9", "\u23ED"};
         int x = 0;
         for (int i = 0; i < glyphs.length; i++) {
             int w = SkinLayout.CBUTTONS_W[i];

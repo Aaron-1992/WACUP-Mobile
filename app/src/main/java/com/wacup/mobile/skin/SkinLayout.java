@@ -171,6 +171,16 @@ public final class SkinLayout {
     public static final int PL_SCROLL_W = 8;
     public static final int PL_MIN_ROWS = 3;
 
+    // ---- aliases kept for the built-in skin ----
+    public static final int TITLE_HEIGHT = TITLE_H;
+    public static final int VOLUME_H = SLIDER_H;
+    public static final int BALANCE_Y = VOLUME_Y;
+    public static final int BALANCE_H = SLIDER_H;
+    public static final int REPEAT_Y = SHUFFLE_Y;
+    public static final int SHUFREP_W = SHUFFLE_W;
+    public static final int TOGGLE_W = WINDOW_BUTTON_W;
+    public static final int TOGGLE_H = WINDOW_BUTTON_H;
+
     /** Glyph cell size of the bitmap fonts. */
     public static final int GLYPH_W = 5;
     public static final int GLYPH_H = 6;
