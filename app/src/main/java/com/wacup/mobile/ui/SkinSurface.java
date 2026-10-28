@@ -46,6 +46,7 @@ public abstract class SkinSurface extends View {
     }
 
     public void setScale(float newScale) {
+        if (Math.abs(newScale - this.scale) < 0.001f) return;
         this.scale = newScale;
         requestLayout();
         invalidate();

@@ -24,7 +24,7 @@ import com.wacup.mobile.ui.EqWindowView;
 import com.wacup.mobile.ui.FileBrowser;
 import com.wacup.mobile.ui.MainWindowView;
 import com.wacup.mobile.ui.PlaylistWindowView;
-import com.wacup.mobile.ui.WacupLayout;
+import com.wacup.mobile.ui.DesktopLayout;
 
 import java.io.File;
 import java.util.List;
@@ -37,7 +37,8 @@ import java.util.List;
 public class MainActivity extends Activity implements MusicEngine.Listener,
         MainWindowView.Callbacks,
         PlaylistWindowView.Callbacks,
-        EqWindowView.Callbacks {
+        EqWindowView.Callbacks,
+        DesktopLayout.Listener {
 
     private static final int REQ_STORAGE = 1;
 
@@ -47,7 +48,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     private MainWindowView mainWindow;
     private EqWindowView eqWindow;
     private PlaylistWindowView playlistWindow;
-    private WacupLayout layout;
+    private DesktopLayout layout;
 
     private final Handler ticker = new Handler(Looper.getMainLooper());
     private final Runnable tickTask = new Runnable() {
@@ -82,7 +83,8 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         playlistWindow.setCallbacks(this);
         eqWindow.setCallbacks(this);
 
-        layout = new WacupLayout(this, mainWindow, eqWindow, playlistWindow);
+        layout = new DesktopLayout(this, mainWindow, eqWindow, playlistWindow);
+        layout.setListener(this);
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF101010);
         root.addView(layout, new FrameLayout.LayoutParams(
@@ -91,6 +93,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         setContentView(root);
 
         applySkin(loadSavedSkin());
+        syncWindowState();
         restoreLastPlaylist();
         requestStoragePermission();
         startPlaybackService();
@@ -194,12 +197,81 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
 
     @Override
     public void onToggleEq() {
-        layout.setEqVisible(!layout.isEqVisible());
+        layout.toggleWindow(DesktopLayout.EQ);
+        syncWindowState();
     }
 
     @Override
     public void onTogglePlaylist() {
-        layout.setPlaylistVisible(!layout.isPlaylistVisible());
+        layout.toggleWindow(DesktopLayout.PLAYLIST);
+        syncWindowState();
+    }
+
+    private void syncWindowState() {
+        mainWindow.setWindowState(layout.isWindowVisible(DesktopLayout.EQ),
+                layout.isWindowVisible(DesktopLayout.PLAYLIST));
+    }
+
+    // ------------------------------------------------------- window management
+
+    @Override
+    public void onTitleTap(int kind) {
+        if (kind == DesktopLayout.MAIN) {
+            showMenu();
+        } else {
+            showWindowsMenu();
+        }
+    }
+
+    @Override
+    public void onToggleShade(int kind) {
+        if (kind == DesktopLayout.MAIN) {
+            layout.setShaded(kind, !layout.isShaded(kind));
+            toast(layout.isShaded(kind) ? "Windowshade" : "Window expanded");
+        }
+    }
+
+    @Override
+    public void onWindowMoved() {
+        // Positions are persisted by the layout.
+    }
+
+    private void showWindowsMenu() {
+        final boolean[] checked = {
+                layout.isWindowVisible(DesktopLayout.EQ),
+                layout.isWindowVisible(DesktopLayout.PLAYLIST)
+        };
+        final String[] names = {"Equaliser window", "Playlist window"};
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Windows")
+                .setMultiChoiceItems(names, checked,
+                        new android.content.DialogInterface.OnMultiChoiceClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int which,
+                                                boolean isChecked) {
+                                int kind = which == 0 ? DesktopLayout.EQ : DesktopLayout.PLAYLIST;
+                                layout.setWindowVisible(kind, isChecked);
+                                syncWindowState();
+                            }
+                        })
+                .setPositiveButton("Done", null)
+                .setNeutralButton(layout.isShaded(DesktopLayout.MAIN) ? "Expand" : "Shade",
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int which) {
+                                layout.setShaded(DesktopLayout.MAIN,
+                                        !layout.isShaded(DesktopLayout.MAIN));
+                            }
+                        })
+                .setNegativeButton("Reset layout", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        layout.resetPositions();
+                        toast("Window positions reset");
+                    }
+                })
+                .show();
     }
 
     @Override
@@ -258,6 +330,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                 "Load skin (.wsz)…",
                 "Use built-in skin",
                 "Clear playlist",
+                "Windows…",
                 "Grant all-files access",
                 "About"
         };
@@ -275,7 +348,8 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                             case 4: loadSkin(); break;
                             case 5: useBaseSkin(); break;
                             case 6: clearPlaylist(); break;
-                            case 7: requestAllFiles(); break;
+                            case 7: showWindowsMenu(); break;
+                            case 8: requestAllFiles(); break;
                             default: showAbout(); break;
                         }
                     }
@@ -466,8 +540,9 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
 
     @Override
     public void onBackPressed() {
-        if (layout.isPlaylistVisible()) {
-            layout.setPlaylistVisible(false);
+        if (layout.isWindowVisible(DesktopLayout.PLAYLIST)) {
+            layout.setWindowVisible(DesktopLayout.PLAYLIST, false);
+            syncWindowState();
             return;
         }
         super.onBackPressed();

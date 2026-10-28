@@ -17,6 +17,12 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
   time display, play/pause/stop indicator, mono/stereo lights.
 - Playlist window: `pledit.bmp` chrome, playlist colours from `pledit.txt`,
   per-row duration, current-track highlight, scrolling, tap to play.
+- **Floating windows like the real thing**: main, equaliser and playlist are
+  separate windows that can be dragged anywhere by their title bars, raised to the
+  front by tapping, shown/hidden independently (skin's EQ/PL buttons or
+  *Windows…* in the menu), rolled up into windowshade by double-tapping the main
+  title bar, and remembered between launches.
+- `titlebar.bmp` art is used for the real title bar, including the shaded row.
 - Equaliser window: 10 bands (-12..+12 dB), on/off, eight presets, wired to the
   device equaliser on the player's audio session.
 - Playlists: reads/writes `.m3u`, `.m3u8`, `.pls` — including Windows paths and
@@ -32,7 +38,9 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
 - DSP plugins, input plugins (MIDI/mod/tracker), Milkdrop/AVS visualisations.
 - Media library database, watch folders, CD ripping, Shoutcast, remote control.
 - Balance slider is drawn from the skin but does not yet change stereo balance.
-- Windows are fixed in place (no drag), no windowshade mode.
+- Only the main window can roll up (windowshade); EQ windowshade artwork is not
+  used yet.
+- No snapping/docking between windows, and no per-window minimise-to-tray.
 
 ## Build the APK
 
@@ -87,7 +95,7 @@ app/src/main/java/com/wacup/mobile/
   ui/MainWindowView.java  main window drawing + hit testing
   ui/PlaylistWindowView.java
   ui/EqWindowView.java
-  ui/WacupLayout.java     scales and arranges the windows
+  ui/DesktopLayout.java   floating windows: drag, z-order, show/hide, windowshade
   ui/FileBrowser.java     plain-filesystem picker
 ```
 

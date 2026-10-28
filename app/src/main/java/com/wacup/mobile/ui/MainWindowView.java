@@ -38,6 +38,10 @@ public class MainWindowView extends SkinSurface {
     private final MusicEngine engine;
     private Callbacks callbacks;
 
+    private boolean shaded;
+    private boolean eqOpen;
+    private boolean plOpen;
+
     private int pressedButton = -1;
     private boolean draggingSeek;
     private boolean draggingVolume;
@@ -54,10 +58,28 @@ public class MainWindowView extends SkinSurface {
         this.callbacks = callbacks;
     }
 
+    /** Windowshade: collapse to the 14px title bar, exactly like Winamp. */
+    public void setShaded(boolean on) {
+        this.shaded = on;
+        requestLayout();
+        invalidate();
+    }
+
+    public boolean isShaded() {
+        return shaded;
+    }
+
+    /** So the EQ / PL buttons on the skin can show their pressed state. */
+    public void setWindowState(boolean eqOpen, boolean plOpen) {
+        this.eqOpen = eqOpen;
+        this.plOpen = plOpen;
+        invalidate();
+    }
+
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         int w = (int) Math.ceil(SkinLayout.MAIN_W * scale);
-        int h = (int) Math.ceil(SkinLayout.MAIN_H * scale);
+        int h = (int) Math.ceil((shaded ? SkinLayout.TITLE_HEIGHT : SkinLayout.MAIN_H) * scale);
         setMeasuredDimension(w, h);
     }
 
@@ -83,12 +105,20 @@ public class MainWindowView extends SkinSurface {
         canvas.save();
         canvas.scale(scale, scale);
         drawBackground(canvas, SkinLayout.MAIN_W, SkinLayout.MAIN_H, true);
+        drawTitleBarArt(canvas);
+
+        if (shaded) {
+            drawShadedTitle(canvas);
+            canvas.restore();
+            return;
+        }
 
         drawTitle(canvas);
         drawTime(canvas);
         drawSeek(canvas);
         drawVolume(canvas);
         drawShuffleRepeat(canvas);
+        drawWindowToggles(canvas);
         drawTransport(canvas);
         drawStateIndicators(canvas);
 
@@ -237,6 +267,56 @@ public class MainWindowView extends SkinSurface {
             SkinPaint.sprite(canvas, skin.monoster, 0, 12, 27, 12,
                     SkinLayout.MONO_X, SkinLayout.MONO_Y, plain);
         }
+    }
+
+    /** titlebar.bmp rows: 0 = active, 15 = inactive, 29 = shaded. */
+    private void drawTitleBarArt(Canvas canvas) {
+        if (skin.titlebar == null) return;
+        int row = shaded ? 29 : 0;
+        if (skin.titlebar.getHeight() < row + SkinLayout.TITLE_HEIGHT) {
+            row = 0;
+        }
+        SkinPaint.sprite(canvas, skin.titlebar, 0, row, SkinLayout.MAIN_W,
+                SkinLayout.TITLE_HEIGHT, 0, 0, plain);
+    }
+
+    private void drawShadedTitle(Canvas canvas) {
+        Track track = engine.currentTrack();
+        String title = track == null ? "WACUP Mobile" : track.title;
+        green.setColor(skin.isBase ? 0xFF00F800 : skin.plNormal);
+        canvas.save();
+        canvas.clipRect(4, 3, SkinLayout.MAIN_W - 60, SkinLayout.TITLE_HEIGHT - 1);
+        skinPaint.drawText(canvas, title, 6, 4, green, SkinLayout.MAIN_W);
+        canvas.restore();
+        skinPaint.drawTime(canvas, engine.timeLabel(), SkinLayout.MAIN_W - 52, 1,
+                green);
+    }
+
+    /** The EQ and PL buttons in the bottom-left of the classic main window. */
+    private void drawWindowToggles(Canvas canvas) {
+        boolean haveArt = skin.shufrep != null && skin.shufrep.getHeight() >= 85
+                && skin.shufrep.getWidth() >= 46;
+        if (haveArt) {
+            SkinPaint.sprite(canvas, skin.shufrep, 0, eqOpen ? 73 : 61,
+                    SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H,
+                    SkinLayout.EQ_BUTTON_X, SkinLayout.EQ_BUTTON_Y, plain);
+            SkinPaint.sprite(canvas, skin.shufrep, 23, plOpen ? 73 : 61,
+                    SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H,
+                    SkinLayout.PL_BUTTON_X, SkinLayout.PL_BUTTON_Y, plain);
+            return;
+        }
+
+        drawToggleLabel(canvas, SkinLayout.EQ_BUTTON_X, SkinLayout.EQ_BUTTON_Y, "EQ", eqOpen);
+        drawToggleLabel(canvas, SkinLayout.PL_BUTTON_X, SkinLayout.PL_BUTTON_Y, "PL", plOpen);
+    }
+
+    private void drawToggleLabel(Canvas canvas, int x, int y, String label, boolean on) {
+        plain.setColor(on ? 0xFF0E3A0E : 0xFF1C1C1C);
+        canvas.drawRect(x, y, x + SkinLayout.TOGGLE_W, y + SkinLayout.TOGGLE_H, plain);
+        plain.setColor(on ? 0xFF00A000 : 0xFF2C2C2C);
+        canvas.drawRect(x, y, x + SkinLayout.TOGGLE_W, y + 1, plain);
+        green.setColor(on ? 0xFF00F800 : 0xFF007000);
+        skinPaint.drawText(canvas, label, x + 3, y + 3, green, SkinLayout.TOGGLE_W - 4);
     }
 
     // ------------------------------------------------------------------ input
