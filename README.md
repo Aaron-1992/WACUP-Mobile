@@ -20,12 +20,20 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
   time display, play/pause/stop indicator, mono/stereo lights.
 - Playlist window: `pledit.bmp` chrome, playlist colours from `pledit.txt`,
   per-row duration, current-track highlight, scrolling, tap to play.
-- **Floating windows like the real thing**: main, equaliser and playlist are
-  separate windows that can be dragged anywhere by their title bars, raised to the
-  front by tapping, shown/hidden independently (skin's EQ/PL buttons or
-  *Windows…* in the menu), rolled up into windowshade by double-tapping the main
-  title bar, and remembered between launches.
-- `titlebar.bmp` art is used for the real title bar, including the shaded row.
+- **Windows that auto-fit and dock**: by default the three windows stack flush
+  like Winamp's snap-together behaviour, at the largest scale that fits, with the
+  playlist growing to fill the leftover height. Drag any title bar and the window
+  detaches; it then snaps to the screen edges, the centre lines and the edges of
+  the other windows. *Windows…* lets you show/hide each one, re-fit, or reset the
+  layout; positions and visibility persist between launches.
+- **Canonical sprite geometry** straight from the format's tables (the ones
+  Webamp uses), so skins land where their authors painted them — including the
+  clutterbar, the 9x13 digit slots, the 4-state shuffle/repeat sprites, the EQ and
+  PL buttons at 219/242 and windowshade mode.
+- **Colour-keyed bitmap fonts**: `text.bmp` and `numbers.bmp` are alpha-masked and
+  tinted with the skin's own palette (`pledit.txt`), using Winamp's real glyph
+  order — text.bmp is *not* ASCII-ordered.
+- A sample skin ships inside the APK (*menu → Load included sample skin*).
 - Equaliser window: 10 bands (-12..+12 dB), on/off, eight presets, wired to the
   device equaliser on the player's audio session.
 - Playlists: reads/writes `.m3u`, `.m3u8`, `.pls` — including Windows paths and
@@ -36,6 +44,7 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
 
 ## What is missing (honest list)
 
+- Window snapping is one-way (there is no "docked group" that moves together).
 - **Modern/freeform skins** (`.wal`, the XML + maki engine). That engine is the big
   missing piece — classic skins are fully supported, modern ones are not.
 - DSP plugins, input plugins (MIDI/mod/tracker), Milkdrop/AVS visualisations.
@@ -45,6 +54,11 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
   used yet.
 - No snapping/docking between windows, and no per-window minimise-to-tray.
 
+![Renderer preview, Haruhi Suzumiya skin](docs/preview-haruhi.png)
+
+*Renderer output for `samples/haruhi-suzumiya.wsz`: main, equaliser and playlist
+stacked the way auto-fit arranges them on a phone.*
+
 ## Build the APK
 
 **Option A — GitHub Actions (recommended, no PC needed)**
@@ -52,10 +66,9 @@ Status: **0.1, first working skeleton.** Expect rough edges; see *What works* be
 The workflow in `.github/workflows/build-apk.yml` builds a debug APK on every push
 and publishes it as a release at `…/releases/tag/apk-latest`.
 
-> **Requires the repository to be public, or Actions billing to be enabled.**
-> On a *private* repo, Actions does not start at all: every job fails within ~4 s
-> with zero steps. Settings → General → Danger Zone → *Change visibility* →
-> Public (free Actions minutes), then push again.
+Actions needs no local toolchain and works on a free public repo. A failing build
+commits its compiler output to `ci/last-failure.log` on the branch, so errors are
+readable even where the Actions log host is blocked.
 
 **Option B — Android Studio**
 
