@@ -3,8 +3,6 @@ package com.wacup.mobile.ui;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffColorFilter;
 import android.view.View;
 
 import com.wacup.mobile.skin.Skin;
@@ -21,16 +19,11 @@ public abstract class SkinSurface extends View {
     protected float scale = 1f;
 
     protected final Paint plain = new Paint();
-    protected final Paint green = new Paint();
-    protected final Paint tint = new Paint();
 
     public SkinSurface(Context context) {
         super(context);
         setWillNotDraw(false);
-        green.setColor(0xFF00F800);
-        green.setFilterBitmap(false);
         plain.setFilterBitmap(false);
-        tint.setFilterBitmap(false);
         setSkin(Skin.base());
     }
 
@@ -54,19 +47,6 @@ public abstract class SkinSurface extends View {
 
     public float scale() {
         return scale;
-    }
-
-    /** Colour filter used for the "pressed" and "dimmed" sprite variants. */
-    protected void setTint(Integer color) {
-        if (color == null) {
-            tint.setColorFilter(null);
-        } else {
-            tint.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_ATOP));
-        }
-    }
-
-    protected Paint spritePaint(boolean tinted) {
-        return tinted ? tint : plain;
     }
 
     protected void drawBackground(Canvas c, int width, int height, boolean haveMain) {

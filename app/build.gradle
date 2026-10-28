@@ -26,6 +26,13 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    sourceSets {
+        main {
+            // The sample skin doubles as a smoke test for the skin engine.
+            assets.srcDirs += ['../../samples']
+        }
+    }
+
     packaging {
         resources.excludes += ['META-INF/LICENSE*', 'META-INF/NOTICE*']
     }

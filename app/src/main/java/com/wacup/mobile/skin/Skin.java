@@ -33,7 +33,8 @@ public final class Skin {
     public Bitmap main;        // main.bmp       275x116
     public Bitmap cbuttons;    // cbuttons.bmp   136x36
     public Bitmap titlebar;    // titlebar.bmp   275x87
-    public Bitmap numbers;     // numbers.bmp    108x13
+    public Bitmap numbers;     // numbers.bmp    99x13  (digits + blank)
+    public Bitmap numsEx;      // nums_ex.bmp    108x13 (digits + ':' + '-')
     public Bitmap text;        // text.bmp       155x18
     public Bitmap volume;      // volume.bmp     68x13 (+pressed row at y=15)
     public Bitmap balance;     // balance.bmp    38x13 (+pressed row at y=15)
@@ -42,12 +43,21 @@ public final class Skin {
     public Bitmap monoster;    // monoster.bmp   56x24
     public Bitmap shufrep;     // shufrep.bmp    92x85
     public Bitmap eqmain;      // eqmain.bmp     275x315
-    public Bitmap eq_ex;       // eq_ex.bmp      275x315
+    public Bitmap eq_ex;       // eq_ex.bmp      275x315 (equaliser windowshade)
     public Bitmap playlist;    // playlist.bmp   275x116
     public Bitmap pledit;      // pledit.bmp     280x186
     public Bitmap video;       // video.bmp
 
     public int[] visColors = DEFAULT_VIS;
+
+    /**
+     * Alpha masks of text.bmp / numbers.bmp. Winamp colour-keys these sheets (the
+     * classic key is magenta, but skins also ship black-on-white or white-on-black),
+     * so the glyph pixels are extracted once and later tinted with whatever colour
+     * the skin asks for.
+     */
+    public Bitmap textMask;
+    public Bitmap numberMask;
 
     // pledit.txt: playlist colours + font name
     public int plNormal = 0xFF00FF00;
@@ -62,17 +72,50 @@ public final class Skin {
     /** Package-private: the built-in skin is built by BaseSkin. */
     Skin() { }
 
+    /**
+     * Winamp's bitmap font is not in ASCII order: text.bmp row 0 holds a-z, then
+     * the quote and the @, row 1 holds the digits and punctuation and row 2 a few
+     * accented letters. This table maps ASCII 32..126 to a glyph index
+     * (row * 31 + column); -1 means "no glyph, draw a space".
+     */
+    private static final byte[] GLYPH = {
+            30, 48, 26, 61, 60, 57, 56, 47, 44, 45, 66, 50, 58, 46, 42, 52,
+            31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 43, 53, 59, 54, 65,
+            27, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+            15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 53, 51, 54, 55, 49,
+            -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+            15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 53, 51, 54, 46,
+    };
+
+    /** Glyph index for a character, or the space glyph when the font lacks it. */
+    public static int glyphIndex(char ch) {
+        char c = ch;
+        if (c >= 'A' && c <= 'Z') c = Character.toLowerCase(c);   // the font is lowercase-only
+        int index = (c < 127 && c >= 32) ? GLYPH[c - 32] : -1;
+        return index < 0 ? GLYPH[' ' - 32] : index;
+    }
+
     public static Skin base() {
         return BaseSkin.create();
     }
 
-    /** True when the skin supplies a usable 5x6 bitmap font. */
-    public boolean hasTextFont() {
-        return text != null && text.getWidth() >= 155;
-    }
-
-    public boolean hasNumberFont() {
-        return numbers != null && numbers.getWidth() >= 99;
+    /** Loads a skin that ships inside the APK (the included sample). */
+    public static Skin fromAssets(android.content.Context context, String assetName)
+            throws IOException {
+        java.io.File temp = new java.io.File(context.getCacheDir(), "sample-skin.wsz");
+        java.io.InputStream in = null;
+        java.io.OutputStream out = null;
+        try {
+            in = context.getAssets().open(assetName);
+            out = new java.io.FileOutputStream(temp);
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) > 0) out.write(buffer, 0, read);
+        } finally {
+            if (in != null) try { in.close(); } catch (IOException ignored) { }
+            if (out != null) try { out.close(); } catch (IOException ignored) { }
+        }
+        return load(temp);
     }
 
     /**
@@ -97,6 +140,10 @@ public final class Skin {
             s.cbuttons = decode(zip, entries, "cbuttons.bmp");
             s.titlebar = decode(zip, entries, "titlebar.bmp");
             s.numbers = decode(zip, entries, "numbers.bmp");
+            s.numsEx = decode(zip, entries, "nums_ex.bmp");
+            // numbers.bmp carries the colon in cell 10; nums_ex.bmp does not, so it is
+            // only a fallback for the digits themselves.
+            if (s.numbers == null) s.numbers = s.numsEx;
             s.text = decode(zip, entries, "text.bmp");
             s.volume = decode(zip, entries, "volume.bmp");
             s.balance = decode(zip, entries, "balance.bmp");
@@ -114,6 +161,9 @@ public final class Skin {
                 throw new IOException("No Winamp skin bitmaps found in this archive");
             }
 
+            s.textMask = toMask(s.text);
+            s.numberMask = toMask(s.numbers);
+
             String pleditTxt = readText(zip, entries, "pledit.txt");
             if (pleditTxt != null) s.parsePledit(pleditTxt);
 
@@ -128,6 +178,41 @@ public final class Skin {
                 // nothing useful to do
             }
         }
+    }
+
+    /**
+     * Converts a colour-keyed font sheet into an alpha-only bitmap: every pixel that
+     * differs from the sheet's top-left colour becomes opaque, the key colour
+     * becomes transparent.
+     */
+    private static Bitmap toMask(Bitmap source) {
+        if (source == null || source.getWidth() == 0 || source.getHeight() == 0) return null;
+        int key = source.getPixel(0, 0);
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int[] pixels = new int[width * height];
+        source.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        int[] out = new int[pixels.length];
+        for (int i = 0; i < pixels.length; i++) {
+            int pixel = pixels[i];
+            if (pixel == key) {
+                out[i] = 0;                        // the colour key -> transparent
+                continue;
+            }
+            // A magenta key often survives compression with slightly different values.
+            int r = (pixel >> 16) & 0xFF;
+            int g = (pixel >> 8) & 0xFF;
+            int b = pixel & 0xFF;
+            if (r > 200 && g < 80 && b > 200) {
+                out[i] = 0;
+                continue;
+            }
+            out[i] = 0xFFFFFFFF;                   // opaque; the tint supplies the colour
+        }
+        Bitmap mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        mask.setPixels(out, 0, width, 0, 0, width, height);
+        return mask;
     }
 
     private void parsePledit(String txt) {

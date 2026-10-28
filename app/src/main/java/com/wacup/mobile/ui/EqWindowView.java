@@ -9,36 +9,28 @@ import com.wacup.mobile.MusicEngine;
 import com.wacup.mobile.skin.SkinLayout;
 import com.wacup.mobile.skin.SkinPaint;
 
-/** The 275x116 equaliser window: ten sliders, on/off and presets. */
+/**
+ * The equaliser window.
+ *
+ * The whole panel (grooves, dB scale, frequency labels, buttons) is painted by the
+ * skin in eqmain.bmp's first 116 rows, so this view draws that art and then puts
+ * only the interactive bits on top: the eleven slider thumbs and the ON button
+ * state. Thumbs come from eqmain.bmp (0,164) / (0,176).
+ */
 public class EqWindowView extends SkinSurface {
 
     public interface Callbacks {
         void onToggleEqEnabled();
-        void onCyclePreset();
-        void onMenu();
+        void onPresetMenu();
+        void onTitleButton(int which);
     }
 
     private static final float MAX_DB = 12f;
 
-    private static final String[] PRESET_NAMES = {
-            "FLAT", "ROCK", "POP", "JAZZ", "CLASSIC", "DANCE", "BASS", "TREBLE"
-    };
-
-    private static final float[][] PRESETS = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {5, 4, 3, 1, -1, -1, 0, 2, 3, 4},
-            {-1, 2, 4, 4, 1, -1, -1, 1, 2, 2},
-            {3, 2, 1, 2, -1, -1, 0, 1, 2, 3},
-            {4, 3, 2, 1, -1, -1, 0, 2, 3, 4},
-            {6, 5, 2, 0, 0, -2, -3, -3, 0, 1},
-            {7, 6, 4, 2, 0, 0, 0, 0, 0, 0},
-            {-3, -2, 0, 1, 2, 3, 4, 5, 6, 6}
-    };
-
     private final MusicEngine engine;
     private Callbacks callbacks;
-    private int presetIndex = -1;
-    private int draggedBand = -1;
+    private int draggedSlider = -1;    // 0 preamp, 1..10 bands
+    private boolean shaded;
 
     public EqWindowView(Context context, MusicEngine engine) {
         super(context);
@@ -49,10 +41,16 @@ public class EqWindowView extends SkinSurface {
         this.callbacks = callbacks;
     }
 
+    public void setShaded(boolean on) {
+        this.shaded = on;
+        requestLayout();
+        invalidate();
+    }
+
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         setMeasuredDimension((int) Math.ceil(SkinLayout.EQ_W * scale),
-                (int) Math.ceil(SkinLayout.EQ_H * scale));
+                Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.EQ_H) * scale));
     }
 
     @Override
@@ -60,85 +58,105 @@ public class EqWindowView extends SkinSurface {
         canvas.save();
         canvas.scale(scale, scale);
 
+        if (shaded) {
+            drawShade(canvas);
+            canvas.restore();
+            return;
+        }
+
         if (skin.eqmain != null) {
             canvas.drawBitmap(skin.eqmain, 0, 0, plain);
-            // The skin's own slider artwork varies; draw our handles on top.
         } else {
             plain.setColor(0xFF232323);
             canvas.drawRect(0, 0, SkinLayout.EQ_W, SkinLayout.EQ_H, plain);
-            plain.setColor(0xFF131313);
-            canvas.drawRect(0, 0, SkinLayout.EQ_W, SkinLayout.TITLE_HEIGHT, plain);
         }
 
-        drawHeader(canvas);
+        drawOnButton(canvas);
         drawSliders(canvas);
-        drawLabels(canvas);
+        drawGraph(canvas);
 
         canvas.restore();
     }
 
-    private void drawHeader(Canvas canvas) {
-        green.setColor(engine.eqEnabled() ? 0xFF00F800 : 0xFF006000);
-        plain.setColor(engine.eqEnabled() ? 0xFF0B2B0B : 0xFF141414);
-        canvas.drawRect(14, 14, 44, 28, plain);
-        skinPaint.drawText(canvas, engine.eqEnabled() ? "ON" : "OFF", 18, 18, green, 24);
-
-        plain.setColor(0xFF141414);
-        canvas.drawRect(48, 14, 108, 28, plain);
-        green.setColor(0xFF00B000);
-        String preset = presetIndex >= 0 && presetIndex < PRESET_NAMES.length
-                ? PRESET_NAMES[presetIndex] : "CUSTOM";
-        skinPaint.drawText(canvas, preset, 52, 18, green, 54);
-
-        green.setColor(0xFF00F800);
-        skinPaint.drawText(canvas, "EQ", 4, 18, green, 12);
+    private void drawShade(Canvas c) {
+        plain.setColor(0xFF232323);
+        c.drawRect(0, 0, SkinLayout.EQ_W, SkinLayout.SHADE_H, plain);
+        if (skin.eq_ex != null) {
+            SkinPaint.sprite(c, skin.eq_ex, 0, 0, SkinLayout.EQ_W, SkinLayout.SHADE_H, 0, 0, plain);
+        } else if (skin.eqmain != null) {
+            SkinPaint.sprite(c, skin.eqmain, 0, 134, SkinLayout.EQ_W, SkinLayout.SHADE_H,
+                    0, 0, plain);
+        }
+        skinPaint.drawText(c, engine.eqEnabled() ? "EQ ON" : "EQ OFF", 6, 4,
+                skin.plNormal, 60);
     }
 
-    private void drawSliders(Canvas canvas) {
+    /** ON button: shufrep-style 4-state sprite from eqmain.bmp. */
+    private void drawOnButton(Canvas c) {
+        if (skin.eqmain == null) return;
+        boolean on = engine.eqEnabled();
+        int srcX = on ? 69 : 10;
+        SkinPaint.sprite(c, skin.eqmain, srcX, 119, SkinLayout.EQ_ON_W,
+                SkinLayout.EQ_BUTTON_H, SkinLayout.EQ_ON_X, SkinLayout.EQ_BUTTON_Y, plain);
+    }
+
+    private void drawSliders(Canvas c) {
         float[] gains = engine.bandGains();
         for (int i = 0; i < gains.length; i++) {
-            int x = SkinLayout.EQ_BAND_X + i * SkinLayout.EQ_BAND_GAP;
-            int top = SkinLayout.EQ_SLIDER_TOP;
-            int bottom = top + SkinLayout.EQ_SLIDER_H;
-
-            // Slot
-            plain.setColor(0xFF0A0A0A);
-            canvas.drawRect(x + 3, top, x + 8, bottom, plain);
-            // Zero line
-            plain.setColor(0xFF1E3A1E);
-            int mid = (top + bottom) / 2;
-            canvas.drawRect(x + 2, mid, x + 9, mid + 1, plain);
-
-            // Filled level from the middle
-            float fraction = gains[i] / MAX_DB;              // -1..1
-            int handleCenter = mid - (int) (fraction * (SkinLayout.EQ_SLIDER_H / 2f));
-            plain.setColor(0xFF00F800);
-            if (fraction >= 0) {
-                canvas.drawRect(x + 4, handleCenter, x + 7, mid, plain);
-            } else {
-                canvas.drawRect(x + 4, mid, x + 7, handleCenter, plain);
-            }
-
-            // Handle
-            int handleTop = handleCenter - SkinLayout.EQ_SLIDER_THUMB_H / 2;
-            plain.setColor(0xFFB0B0B0);
-            canvas.drawRect(x, handleTop, x + SkinLayout.EQ_SLIDER_THUMB_W,
-                    handleTop + SkinLayout.EQ_SLIDER_THUMB_H, plain);
-            plain.setColor(0xFF3A3A3A);
-            canvas.drawRect(x, handleTop, x + SkinLayout.EQ_SLIDER_THUMB_W,
-                    handleTop + 1, plain);
+            int x = i == 0 ? SkinLayout.EQ_PREAMP_X
+                    : SkinLayout.EQ_BAND_X + (i - 1) * SkinLayout.EQ_BAND_PITCH;
+            drawThumb(c, x, gains[i], draggedSlider == i);
         }
     }
 
-    private void drawLabels(Canvas canvas) {
-        green.setColor(0xFF00A000);
-        for (int i = 0; i < MusicEngine.BAND_LABELS.length; i++) {
-            int x = SkinLayout.EQ_BAND_X + i * SkinLayout.EQ_BAND_GAP - 2;
-            skinPaint.drawText(canvas, MusicEngine.BAND_LABELS[i], x,
-                    SkinLayout.EQ_SLIDER_TOP + SkinLayout.EQ_SLIDER_H + 3, green, 20);
+    private void drawThumb(Canvas c, int x, float gainDb, boolean active) {
+        int travel = SkinLayout.EQ_SLIDER_H - SkinLayout.EQ_THUMB_H;
+        float fraction = (gainDb / MAX_DB + 1f) / 2f;      // 0 bottom .. 1 top
+        fraction = Math.max(0f, Math.min(1f, fraction));
+        int y = SkinLayout.EQ_SLIDER_Y + Math.round(travel * (1f - fraction));
+
+        if (skin.eqmain != null) {
+            int srcX = active ? 0 : 0;
+            int srcY = active ? 176 : 164;
+            if (srcY + SkinLayout.EQ_THUMB_H <= skin.eqmain.getHeight()) {
+                SkinPaint.sprite(c, skin.eqmain, srcX, srcY, SkinLayout.EQ_THUMB_W,
+                        SkinLayout.EQ_THUMB_H, x, y, plain);
+                return;
+            }
         }
-        green.setColor(0xFF00F800);
-        skinPaint.drawText(canvas, "PRE", 2, SkinLayout.EQ_SLIDER_TOP + 4, green, 16);
+        plain.setColor(0xFFC8C8C8);
+        c.drawRect(x, y, x + SkinLayout.EQ_THUMB_W, y + SkinLayout.EQ_THUMB_H, plain);
+        plain.setColor(0xFF444444);
+        c.drawRect(x, y + 5, x + SkinLayout.EQ_THUMB_W, y + 6, plain);
+    }
+
+    /** The curve inside the skin's graph box, drawn from viscolor.txt. */
+    private void drawGraph(Canvas c) {
+        Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+        line.setColor(skin.visColors[Math.min(17, skin.visColors.length - 1)]);
+        line.setStrokeWidth(1f);
+
+        float[] gains = engine.bandGains();
+        int gx = SkinLayout.EQ_GRAPH_X;
+        int gy = SkinLayout.EQ_GRAPH_Y;
+        int gw = SkinLayout.EQ_GRAPH_W;
+        int gh = SkinLayout.EQ_GRAPH_H;
+        float step = gw / 10f;
+
+        float prevX = gx;
+        float prevY = bandY(gy, gh, gains[0]);
+        for (int i = 1; i < gains.length; i++) {
+            float x = gx + step * i;
+            float y = bandY(gy, gh, gains[i]);
+            c.drawLine(prevX, prevY, x, y, line);
+            prevX = x;
+            prevY = y;
+        }
+    }
+
+    private float bandY(int graphY, int graphH, float gainDb) {
+        float fraction = (gainDb / MAX_DB + 1f) / 2f;
+        return graphY + graphH - (graphH * fraction);
     }
 
     // ------------------------------------------------------------------ input
@@ -150,37 +168,42 @@ public class EqWindowView extends SkinSurface {
 
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                if (x >= 14 && x <= 44 && y >= 12 && y <= 30) {
+                if (y <= SkinLayout.TITLE_H) {
+                    if (x >= SkinLayout.EQ_CLOSE_X - 2) {
+                        if (callbacks != null) callbacks.onTitleButton(0);
+                    } else if (x >= SkinLayout.EQ_SHADE_X - 2 && x < SkinLayout.EQ_CLOSE_X - 2) {
+                        if (callbacks != null) callbacks.onTitleButton(1);
+                    }
+                    return true;
+                }
+                if (inside(x, y, SkinLayout.EQ_ON_X, SkinLayout.EQ_BUTTON_Y,
+                        SkinLayout.EQ_ON_W, SkinLayout.EQ_BUTTON_H)) {
                     if (callbacks != null) callbacks.onToggleEqEnabled();
                     return true;
                 }
-                if (x >= 48 && x <= 108 && y >= 12 && y <= 30) {
-                    if (callbacks != null) callbacks.onCyclePreset();
+                if (inside(x, y, SkinLayout.EQ_PRESETS_X, SkinLayout.EQ_BUTTON_Y,
+                        SkinLayout.EQ_PRESETS_W, SkinLayout.EQ_BUTTON_H)) {
+                    if (callbacks != null) callbacks.onPresetMenu();
                     return true;
                 }
-                draggedBand = bandAt(x);
-                if (draggedBand >= 0) {
-                    applyGain(draggedBand, y);
+                draggedSlider = sliderAt(x);
+                if (draggedSlider >= 0) {
+                    applyGain(draggedSlider, y);
                     return true;
-                }
-                if (y < SkinLayout.TITLE_HEIGHT) {
-                    if (callbacks != null) callbacks.onMenu();
                 }
                 return true;
 
             case MotionEvent.ACTION_MOVE:
-                if (draggedBand >= 0) {
-                    applyGain(draggedBand, y);
+                if (draggedSlider >= 0) {
+                    applyGain(draggedSlider, y);
                     return true;
                 }
                 return true;
 
             case MotionEvent.ACTION_UP:
-                draggedBand = -1;
-                return true;
-
             case MotionEvent.ACTION_CANCEL:
-                draggedBand = -1;
+                draggedSlider = -1;
+                invalidate();
                 return true;
 
             default:
@@ -188,35 +211,46 @@ public class EqWindowView extends SkinSurface {
         }
     }
 
-    private int bandAt(float x) {
-        for (int i = 0; i < MusicEngine.BAND_LABELS.length; i++) {
-            int left = SkinLayout.EQ_BAND_X + i * SkinLayout.EQ_BAND_GAP - 4;
-            if (x >= left && x <= left + SkinLayout.EQ_BAND_GAP) return i;
+    private int sliderAt(float x) {
+        if (x >= SkinLayout.EQ_PREAMP_X - 4
+                && x <= SkinLayout.EQ_PREAMP_X + SkinLayout.EQ_SLIDER_W + 4) {
+            return 0;
+        }
+        for (int i = 1; i <= 10; i++) {
+            int bandX = SkinLayout.EQ_BAND_X + (i - 1) * SkinLayout.EQ_BAND_PITCH;
+            if (x >= bandX - 4 && x <= bandX + SkinLayout.EQ_SLIDER_W + 4) {
+                return i;
+            }
         }
         return -1;
     }
 
-    private void applyGain(int band, float y) {
-        int top = SkinLayout.EQ_SLIDER_TOP;
+    private void applyGain(int slider, float y) {
+        int top = SkinLayout.EQ_SLIDER_Y;
         int bottom = top + SkinLayout.EQ_SLIDER_H;
-        float fraction = 1f - ((y - top) / (float) (bottom - top));   // 0 top .. 1 bottom
+        float fraction = 1f - ((y - top) / (float) (bottom - top));
         fraction = Math.max(0f, Math.min(1f, fraction));
         float db = (fraction * 2f - 1f) * MAX_DB;
-        presetIndex = -1;
-        engine.setBandGain(band, db);
-        invalidate();
-    }
-
-    public void applyPreset(int index) {
-        if (index < 0 || index >= PRESETS.length) return;
-        presetIndex = index;
-        for (int i = 0; i < PRESETS[index].length; i++) {
-            engine.setBandGain(i, PRESETS[index][i]);
+        if (slider == 0) {
+            // preamp is applied as an offset on every band
+            float delta = db - preampDb;
+            preampDb = db;
+            for (int i = 0; i < MusicEngine.BAND_LABELS.length; i++) {
+                engine.setBandGain(i, engine.bandGains()[i] + delta);
+            }
+        } else {
+            engine.setBandGain(slider - 1, db);
         }
         invalidate();
     }
 
-    public void nextPreset() {
-        applyPreset((presetIndex + 1) % PRESETS.length);
+    private float preampDb = 0f;
+
+    public float preampDb() {
+        return preampDb;
+    }
+
+    private boolean inside(float x, float y, int rx, int ry, int rw, int rh) {
+        return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
     }
 }

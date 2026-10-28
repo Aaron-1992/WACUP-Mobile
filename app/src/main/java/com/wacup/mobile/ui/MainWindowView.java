@@ -3,11 +3,7 @@ package com.wacup.mobile.ui;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.view.MotionEvent;
-import android.view.View;
-
-import androidx.annotation.Nullable;
 
 import com.wacup.mobile.MusicEngine;
 import com.wacup.mobile.playlist.Track;
@@ -15,50 +11,53 @@ import com.wacup.mobile.skin.SkinLayout;
 import com.wacup.mobile.skin.SkinPaint;
 
 /**
- * The 275x116 main window, drawn entirely from the loaded skin.
+ * The 275x116 main window.
  *
- * Touch targets follow the classic layout, but they are enlarged for fingers: the
- * hit test runs in skin coordinates and neighbouring controls stay reachable.
+ * Every element is placed on the classic sprite grid (see SkinLayout), so any
+ * Winamp 2.x skin lands where its author intended. Synth fallbacks only kick in
+ * when a skin is missing a sheet.
  */
 public class MainWindowView extends SkinSurface {
 
+    public static final int TITLE_OPTIONS = 0;
+    public static final int TITLE_MINIMIZE = 1;
+    public static final int TITLE_SHADE = 2;
+    public static final int TITLE_CLOSE = 3;
+
     public interface Callbacks {
-        void onTransport(int button);      // 0 prev, 1 play, 2 pause, 3 stop, 4 next, 5 eject
+        void onTransport(int button);
         void onSeek(float fraction);
-        void onVolume(int percent);
-        void onToggleEq();
-        void onTogglePlaylist();
+        void onSlider(boolean volume, float fraction);
+        void onToggleEqWindow();
+        void onTogglePlaylistWindow();
         void onShuffle();
         void onRepeat();
         void onMenu();
+        void onTitleButton(int which);
     }
-
-    private static final int BUTTON_COUNT = 6;
 
     private final MusicEngine engine;
     private Callbacks callbacks;
 
+    private int pressedButton = -1;          // transport 0..5, 10+shuffle/repeat/eq/pl
+    private int pressedTitle = -1;
+    private int draggedSlider = -1;          // 0 seek, 1 volume, 2 balance
     private boolean shaded;
     private boolean eqOpen;
     private boolean plOpen;
-
-    private int pressedButton = -1;
-    private boolean draggingSeek;
-    private boolean draggingVolume;
-    private String scrollTitle = "";
-    private int titleScrollPx;
+    private String marquee = "";
+    private int marqueeOffset;
+    private float balance = 0.5f;
 
     public MainWindowView(Context context, MusicEngine engine) {
         super(context);
         this.engine = engine;
-        setFocusable(true);
     }
 
     public void setCallbacks(Callbacks callbacks) {
         this.callbacks = callbacks;
     }
 
-    /** Windowshade: collapse to the 14px title bar, exactly like Winamp. */
     public void setShaded(boolean on) {
         this.shaded = on;
         requestLayout();
@@ -69,338 +68,426 @@ public class MainWindowView extends SkinSurface {
         return shaded;
     }
 
-    /** So the EQ / PL buttons on the skin can show their pressed state. */
     public void setWindowState(boolean eqOpen, boolean plOpen) {
         this.eqOpen = eqOpen;
         this.plOpen = plOpen;
         invalidate();
     }
 
+    public float balance() {
+        return balance;
+    }
+
+    /** Called from the activity ticker so the title scrolls like Winamp's. */
+    public void tick() {
+        Track track = engine.currentTrack();
+        String title = track == null ? "" : track.title;
+        if (!title.equals(marquee)) {
+            marquee = title;
+            marqueeOffset = 0;
+            invalidate();
+            return;
+        }
+        if (!engine.isPlaying()) return;
+        float width = skinPaint.textWidth(title);
+        if (width <= SkinLayout.MARQUEE_W) return;
+        marqueeOffset++;
+        if (marqueeOffset > width + 30) marqueeOffset = 0;
+        invalidate();
+    }
+
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         int w = (int) Math.ceil(SkinLayout.MAIN_W * scale);
-        int h = (int) Math.ceil((shaded ? SkinLayout.TITLE_HEIGHT : SkinLayout.MAIN_H) * scale);
+        int h = Math.ceil((shaded ? SkinLayout.SHADE_H : SkinLayout.MAIN_H) * scale);
         setMeasuredDimension(w, h);
     }
 
-    /** Called by the activity's animation ticker so the title can scroll. */
-    public void tick() {
-        if (!engine.isPlaying()) return;
-        Track track = engine.currentTrack();
-        String title = track == null ? "" : track.title;
-        if (!title.equals(scrollTitle)) {
-            scrollTitle = title;
-            titleScrollPx = 0;
-            return;
-        }
-        if (skinPaint.textWidth(title) > SkinLayout.TITLE_TEXT_W) {
-            titleScrollPx += 1;
-            if (titleScrollPx > skinPaint.textWidth(title) + 24) titleScrollPx = 0;
-            invalidate();
-        }
-    }
+    // ------------------------------------------------------------------- draw
 
     @Override
     protected void onDraw(Canvas canvas) {
         canvas.save();
         canvas.scale(scale, scale);
-        drawBackground(canvas, SkinLayout.MAIN_W, SkinLayout.MAIN_H, true);
-        drawTitleBarArt(canvas);
 
         if (shaded) {
-            drawShadedTitle(canvas);
+            drawShade(canvas);
             canvas.restore();
             return;
         }
 
-        drawTitle(canvas);
+        drawBackground(canvas, SkinLayout.MAIN_W, SkinLayout.MAIN_H, true);
+        drawTitleBar(canvas);
+        drawClutterBar(canvas);
+        drawMarquee(canvas);
         drawTime(canvas);
-        drawSeek(canvas);
-        drawVolume(canvas);
+        drawIndicators(canvas);
+        drawVolumeBalance(canvas);
+        drawWindowButtons(canvas);
+        drawSeekBar(canvas);
         drawShuffleRepeat(canvas);
-        drawWindowToggles(canvas);
         drawTransport(canvas);
-        drawStateIndicators(canvas);
 
         canvas.restore();
     }
 
-    private void drawTitle(Canvas canvas) {
+    private void drawTitleBar(Canvas c) {
+        if (skin.titlebar != null) {
+            SkinPaint.sprite(c, skin.titlebar, 27, 0, SkinLayout.MAIN_W,
+                    SkinLayout.TITLE_H, 0, 0, plain);
+            // options / minimise / shade / close glyphs
+            int y = SkinLayout.TITLE_BUTTON_Y;
+            SkinPaint.sprite(c, skin.titlebar, 0, 0, 9, 9, SkinLayout.OPTIONS_X, y, plain);
+            SkinPaint.sprite(c, skin.titlebar, 9, 0, 9, 9, SkinLayout.MINIMIZE_X, y, plain);
+            SkinPaint.sprite(c, skin.titlebar, 0, 18, 9, 9, SkinLayout.SHADE_X, y, plain);
+            SkinPaint.sprite(c, skin.titlebar, 18, 0, 9, 9, SkinLayout.CLOSE_X, y, plain);
+        } else {
+            plain.setColor(0xFF2E2E2E);
+            c.drawRect(0, 0, SkinLayout.MAIN_W, SkinLayout.TITLE_H, plain);
+            plain.setColor(0xFF4A4A4A);
+            c.drawRect(0, 0, SkinLayout.MAIN_W, 1, plain);
+        }
+    }
+
+    private void drawClutterBar(Canvas c) {
+        if (skin.titlebar == null) return;
+        SkinPaint.sprite(c, skin.titlebar, 304, 0, SkinLayout.CLUTTER_W,
+                SkinLayout.CLUTTER_H, SkinLayout.CLUTTER_X, SkinLayout.CLUTTER_Y, plain);
+    }
+
+    private void drawMarquee(Canvas c) {
         Track track = engine.currentTrack();
         String title = track == null ? "WACUP Mobile" : track.title;
-        canvas.save();
-        canvas.clipRect(SkinLayout.TITLE_TEXT_X, SkinLayout.TITLE_TEXT_Y,
-                SkinLayout.TITLE_TEXT_X + SkinLayout.TITLE_TEXT_W,
-                SkinLayout.TITLE_TEXT_Y + SkinLayout.GLYPH_H);
-        float x = SkinLayout.TITLE_TEXT_X - titleScrollPx;
-        float w = skinPaint.textWidth(title) + 12;
-        if (w < SkinLayout.TITLE_TEXT_W) x = SkinLayout.TITLE_TEXT_X;
-        green.setColor(skin.isBase ? 0xFF00F800 : skin.plNormal);
-        green.setAlpha(0xFF);
-        skinPaint.drawText(canvas, title, x, SkinLayout.TITLE_TEXT_Y, green,
-                SkinLayout.TITLE_TEXT_W * 4);
-        canvas.restore();
-    }
-
-    private void drawTime(Canvas canvas) {
-        green.setColor(skin.isBase ? 0xFF00F800 : skin.visColors[Math.min(23, skin.visColors.length - 1)]);
-        skinPaint.drawTime(canvas, engine.timeLabel(), SkinLayout.TIME_X,
-                SkinLayout.TIME_Y, green);
-    }
-
-    private void drawSeek(Canvas canvas) {
-        // Track background
-        if (skin.posbar != null) {
-            SkinPaint.sprite(canvas, skin.posbar, 0, 0,
-                    SkinLayout.POSBAR_W, SkinLayout.POSBAR_H,
-                    SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y, plain);
-        } else {
-            plain.setColor(0xFF0B100B);
-            canvas.drawRect(SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y,
-                    SkinLayout.POSBAR_X + SkinLayout.POSBAR_W,
-                    SkinLayout.POSBAR_Y + SkinLayout.POSBAR_H, plain);
+        if (title.isEmpty()) return;
+        float width = skinPaint.textWidth(title);
+        float x = SkinLayout.MARQUEE_X;
+        if (width > SkinLayout.MARQUEE_W) {
+            x -= marqueeOffset;
         }
-
-        float fraction = engine.positionFraction();
-        int travel = SkinLayout.POSBAR_W - SkinLayout.POSBAR_THUMB_W;
-        int thumbX = SkinLayout.POSBAR_X + (int) (travel * fraction);
-
-        if (skin.posbar != null && skin.posbar.getHeight() >= 20) {
-            SkinPaint.sprite(canvas, skin.posbar, 0, 10,
-                    SkinLayout.POSBAR_THUMB_W, SkinLayout.POSBAR_H,
-                    thumbX, SkinLayout.POSBAR_Y, plain);
-        } else {
-            plain.setColor(0xFF00F800);
-            canvas.drawRect(thumbX, SkinLayout.POSBAR_Y, thumbX + 6,
-                    SkinLayout.POSBAR_Y + SkinLayout.POSBAR_H, plain);
-        }
+        c.save();
+        c.clipRect(SkinLayout.MARQUEE_X, SkinLayout.MARQUEE_Y,
+                SkinLayout.MARQUEE_X + SkinLayout.MARQUEE_W,
+                SkinLayout.MARQUEE_Y + SkinLayout.MARQUEE_H);
+        // Colour-keyed text.bmp: tint it with the playlist's "normal" colour, which
+        // is what Winamp uses for the marquee.
+        int color = skin.plNormal;
+        skinPaint.drawText(c, title, x, SkinLayout.MARQUEE_Y, color,
+                SkinLayout.MARQUEE_W + (width > SkinLayout.MARQUEE_W ? marqueeOffset : 0));
+        c.restore();
     }
 
-    private void drawVolume(Canvas canvas) {
-        int volume = engine.volumePercent();
-        if (skin.volume != null) {
-            SkinPaint.sprite(canvas, skin.volume, 0, 0,
-                    SkinLayout.VOLUME_W, SkinLayout.VOLUME_H,
-                    SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y, plain);
-            int thumbW = 14;
-            int travel = SkinLayout.VOLUME_W - thumbW;
-            int x = SkinLayout.VOLUME_X + (int) (travel * volume / 100f);
-            SkinPaint.sprite(canvas, skin.volume, 0, 0, thumbW,
-                    SkinLayout.VOLUME_H, x, SkinLayout.VOLUME_Y, plain);
-        } else {
-            plain.setColor(0xFF0B100B);
-            canvas.drawRect(SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y,
-                    SkinLayout.VOLUME_X + SkinLayout.VOLUME_W,
-                    SkinLayout.VOLUME_Y + SkinLayout.VOLUME_H, plain);
-            plain.setColor(0xFF00F800);
-            int filled = (int) (SkinLayout.VOLUME_W * volume / 100f);
-            canvas.drawRect(SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y,
-                    SkinLayout.VOLUME_X + filled,
-                    SkinLayout.VOLUME_Y + SkinLayout.VOLUME_H, plain);
-        }
+    private void drawTime(Canvas c) {
+        int timeColor = skin.visColors[Math.min(23, skin.visColors.length - 1)];
+        skinPaint.drawTime(c, engine.timeLabel(), timeColor);
     }
 
-    private void drawShuffleRepeat(Canvas canvas) {
-        if (skin.shufrep == null) {
-            drawToggleText(canvas, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y,
-                    "SHUF " + (engine.shuffle() ? "ON" : "OFF"), engine.shuffle());
-            drawToggleText(canvas, SkinLayout.REPEAT_X, SkinLayout.REPEAT_Y,
-                    engine.repeatLabel(), engine.repeatMode() != 0);
-            return;
-        }
-        // shufrep.bmp: shuffle off at (28,0) / on at (28,15); repeat off (0,0) / on (0,30)
-        SkinPaint.sprite(canvas, skin.shufrep, 28, engine.shuffle() ? 15 : 0,
-                SkinLayout.SHUFREP_W, SkinLayout.SHUFREP_H,
-                SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y, plain);
-        int repeatRow = engine.repeatMode() == 0 ? 0
-                : (engine.repeatMode() == 1 ? 30 : 45);
-        SkinPaint.sprite(canvas, skin.shufrep, 0, repeatRow,
-                SkinLayout.SHUFREP_W, SkinLayout.SHUFREP_H,
-                SkinLayout.REPEAT_X, SkinLayout.REPEAT_Y, plain);
-    }
-
-    private void drawToggleText(Canvas canvas, int x, int y, String label, boolean on) {
-        plain.setColor(on ? 0xFF00F800 : 0xFF00A000);
-        canvas.drawRect(x, y, x + SkinLayout.SHUFREP_W, y + SkinLayout.SHUFREP_H, plain);
-        green.setColor(0xFF000000);
-        skinPaint.drawText(canvas, label, x + 2, y + 4, green, SkinLayout.SHUFREP_W - 4);
-    }
-
-    private void drawTransport(Canvas canvas) {
-        int[] rows = {0, 18};   // normal, pressed
-        for (int i = 0; i < BUTTON_COUNT; i++) {
-            int x = SkinLayout.CBUTTONS_X[i];
-            int w = SkinLayout.CBUTTONS_W[i];
-            int rowY = (pressedButton == i) ? rows[1] : rows[0];
-            if (skin.cbuttons != null) {
-                SkinPaint.sprite(canvas, skin.cbuttons, x, rowY, w,
-                        SkinLayout.CBUTTONS_H, x, SkinLayout.CBUTTONS_Y, plain);
-            } else {
-                plain.setColor(pressedButton == i ? 0xFF333333 : 0xFF454545);
-                canvas.drawRect(x + 1, SkinLayout.CBUTTONS_Y + 1, x + w - 1,
-                        SkinLayout.CBUTTONS_Y + SkinLayout.CBUTTONS_H - 1, plain);
-                green.setColor(0xFFE8E8E8);
-                String glyph;
-                switch (i) {
-                    case 0: glyph = "|<"; break;
-                    case 1: glyph = ">"; break;
-                    case 2: glyph = "||"; break;
-                    case 3: glyph = "[]"; break;
-                    case 4: glyph = ">|"; break;
-                    default: glyph = "^"; break;
-                }
-                skinPaint.drawText(canvas, glyph, x + 3, SkinLayout.CBUTTONS_Y + 6,
-                        green, w - 6);
-            }
-        }
-    }
-
-    private void drawStateIndicators(Canvas canvas) {
+    private void drawIndicators(Canvas c) {
         if (skin.playpaus != null) {
-            int state = engine.isPlaying() ? 0 : 2;   // 0 play, 1 pause, 2 stop
-            SkinPaint.sprite(canvas, skin.playpaus, state * 9, 0, 9, 9,
+            int state = engine.isPlaying() ? 0 : (engine.player().isLoading() ? 1 : 2);
+            SkinPaint.sprite(c, skin.playpaus, state * 9, 0, 9, 9,
                     SkinLayout.PLAYPAUS_X, SkinLayout.PLAYPAUS_Y, plain);
         }
         if (skin.monoster != null) {
-            SkinPaint.sprite(canvas, skin.monoster, 28, 0, 27, 12,
-                    SkinLayout.STEREO_X, SkinLayout.STEREO_Y, plain);
-            SkinPaint.sprite(canvas, skin.monoster, 0, 12, 27, 12,
-                    SkinLayout.MONO_X, SkinLayout.MONO_Y, plain);
+            // selected row (y=0) is the lit state
+            SkinPaint.sprite(c, skin.monoster, 0, 0, SkinLayout.STEREO_W,
+                    SkinLayout.STEREO_H, SkinLayout.STEREO_X, SkinLayout.STEREO_Y, plain);
+            SkinPaint.sprite(c, skin.monoster, 29, 12, SkinLayout.MONO_W,
+                    SkinLayout.STEREO_H, SkinLayout.MONO_X, SkinLayout.STEREO_Y, plain);
+        }
+        // bitrate / sample rate are only known for some formats; leave blanks
+    }
+
+    private void drawVolumeBalance(Canvas c) {
+        int volume = engine.volumePercent();
+
+        if (skin.volume != null) {
+            SkinPaint.sprite(c, skin.volume, 0, 0, SkinLayout.VOLUME_W,
+                    SkinLayout.SLIDER_H, SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y, plain);
+        } else {
+            trough(c, SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y, SkinLayout.VOLUME_W);
+        }
+        int volumeTravel = SkinLayout.VOLUME_W - SkinLayout.SLIDER_THUMB_W;
+        drawThumb(c, skin.volume, SkinLayout.VOLUME_X + Math.round(volumeTravel * volume / 100f),
+                SkinLayout.VOLUME_Y + 1, SLIDER_NORMAL);
+
+        if (skin.balance != null) {
+            SkinPaint.sprite(c, skin.balance, 0, 0, SkinLayout.BALANCE_W,
+                    SkinLayout.SLIDER_H, SkinLayout.BALANCE_X, SkinLayout.BALANCE_Y, plain);
+        } else if (skin.volume != null) {
+            // Winamp crops the balance bar out of volume.bmp when balance.bmp is absent
+            SkinPaint.sprite(c, skin.volume, 9, 0, SkinLayout.BALANCE_W,
+                    SkinLayout.SLIDER_H, SkinLayout.BALANCE_X, SkinLayout.BALANCE_Y, plain);
+        } else {
+            trough(c, SkinLayout.BALANCE_X, SkinLayout.BALANCE_Y, SkinLayout.BALANCE_W);
+        }
+        int balanceTravel = SkinLayout.BALANCE_W - SkinLayout.SLIDER_THUMB_W;
+        drawThumb(c, skin.balance, SkinLayout.BALANCE_X
+                        + Math.round(balanceTravel * (balance - 0.5f) * 2f * 0.5f + balanceTravel * 0.5f),
+                SkinLayout.BALANCE_Y + 1, SLIDER_NORMAL);
+    }
+
+    private static final int SLIDER_NORMAL = 0;
+    private static final int SLIDER_ACTIVE = 1;
+
+    /** 14x11 slider thumb: from the skin atlas when it exists, drawn otherwise. */
+    private void drawThumb(Canvas c, android.graphics.Bitmap atlas, int x, int y, int state) {
+        if (atlas != null) {
+            int atlasX = state == SLIDER_ACTIVE ? 0 : 15;
+            int atlasY = 422;
+            if (atlasY + SkinLayout.SLIDER_THUMB_H <= atlas.getHeight()) {
+                SkinPaint.sprite(c, atlas, atlasX, atlasY, SkinLayout.SLIDER_THUMB_W,
+                        SkinLayout.SLIDER_THUMB_H, x, y, plain);
+                return;
+            }
+        }
+        plain.setColor(0xFFC8C8C8);
+        c.drawRect(x, y, x + SkinLayout.SLIDER_THUMB_W, y + SkinLayout.SLIDER_THUMB_H, plain);
+        plain.setColor(0xFF5C5C5C);
+        c.drawRect(x, y, x + SkinLayout.SLIDER_THUMB_W, y + 1, plain);
+        c.drawRect(x, y + SkinLayout.SLIDER_THUMB_H - 1, x + SkinLayout.SLIDER_THUMB_W,
+                y + SkinLayout.SLIDER_THUMB_H, plain);
+        plain.setColor(0xFF303030);
+        c.drawRect(x + 6, y + 2, x + 8, y + SkinLayout.SLIDER_THUMB_H - 2, plain);
+    }
+
+    private void trough(Canvas c, int x, int y, int w) {
+        plain.setColor(0xFF101010);
+        c.drawRect(x, y, x + w, y + SkinLayout.SLIDER_H, plain);
+        plain.setColor(0xFF2A2A2A);
+        c.drawRect(x + 1, y + 1, x + w - 1, y + 2, plain);
+    }
+
+    private void drawWindowButtons(Canvas c) {
+        if (skin.shufrep == null) return;
+        SkinPaint.sprite(c, skin.shufrep, 0, eqOpen ? 73 : 61, SkinLayout.WINDOW_BUTTON_W,
+                SkinLayout.WINDOW_BUTTON_H, SkinLayout.EQ_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y, plain);
+        SkinPaint.sprite(c, skin.shufrep, 23, plOpen ? 73 : 61, SkinLayout.WINDOW_BUTTON_W,
+                SkinLayout.WINDOW_BUTTON_H, SkinLayout.PL_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y, plain);
+    }
+
+    private void drawSeekBar(Canvas c) {
+        if (skin.posbar != null) {
+            SkinPaint.sprite(c, skin.posbar, 0, 0, SkinLayout.POSBAR_W,
+                    SkinLayout.POSBAR_H, SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y, plain);
+        } else {
+            trough(c, SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y, SkinLayout.POSBAR_W);
+        }
+        float fraction = engine.positionFraction();
+        int travel = SkinLayout.POSBAR_W - SkinLayout.POSBAR_THUMB_W;
+        int x = SkinLayout.POSBAR_X + Math.round(travel * fraction);
+        boolean pressed = draggedSlider == 0;
+        if (skin.posbar != null && skin.posbar.getWidth() >= 307) {
+            int srcX = pressed ? 278 : 248;
+            SkinPaint.sprite(c, skin.posbar, srcX, 0, SkinLayout.POSBAR_THUMB_W,
+                    SkinLayout.POSBAR_H, x, SkinLayout.POSBAR_Y, plain);
+        } else {
+            plain.setColor(0xFFD0D0D0);
+            c.drawRect(x, SkinLayout.POSBAR_Y, x + SkinLayout.POSBAR_THUMB_W,
+                    SkinLayout.POSBAR_Y + SkinLayout.POSBAR_H, plain);
         }
     }
 
-    /** titlebar.bmp rows: 0 = active, 15 = inactive, 29 = shaded. */
-    private void drawTitleBarArt(Canvas canvas) {
-        if (skin.titlebar == null) return;
-        int row = shaded ? 29 : 0;
-        if (skin.titlebar.getHeight() < row + SkinLayout.TITLE_HEIGHT) {
-            row = 0;
+    private void drawShuffleRepeat(Canvas c) {
+        if (skin.shufrep == null) return;
+
+        int shuffleRow = engine.shuffle() ? 30 : 0;
+        if (pressedButton == 10) shuffleRow += 15;
+        SkinPaint.sprite(c, skin.shufrep, 28, shuffleRow, SkinLayout.SHUFFLE_W,
+                SkinLayout.SHUFREP_H, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y, plain);
+
+        int repeatRow = engine.repeatMode() == 0 ? 0 : 30;
+        if (pressedButton == 11) repeatRow += 15;
+        SkinPaint.sprite(c, skin.shufrep, 0, repeatRow, SkinLayout.REPEAT_W,
+                SkinLayout.SHUFREP_H, SkinLayout.REPEAT_X, SkinLayout.SHUFFLE_Y, plain);
+    }
+
+    private void drawTransport(Canvas c) {
+        for (int i = 0; i < SkinLayout.CBUTTONS_X.length; i++) {
+            int x = SkinLayout.CBUTTONS_X[i];
+            int w = SkinLayout.CBUTTONS_W[i];
+            int row = pressedButton == i ? 18 : 0;
+            if (skin.cbuttons != null) {
+                SkinPaint.sprite(c, skin.cbuttons, x, row, w, SkinLayout.CBUTTONS_H,
+                        x, SkinLayout.CBUTTONS_Y, plain);
+            } else {
+                plain.setColor(pressedButton == i ? 0xFF303030 : 0xFF4C4C4C);
+                c.drawRect(x + 1, SkinLayout.CBUTTONS_Y + 1, x + w - 1,
+                        SkinLayout.CBUTTONS_Y + SkinLayout.CBUTTONS_H - 1, plain);
+            }
         }
-        SkinPaint.sprite(canvas, skin.titlebar, 0, row, SkinLayout.MAIN_W,
-                SkinLayout.TITLE_HEIGHT, 0, 0, plain);
+        int row = pressedButton == SkinLayout.EJECT ? SkinLayout.EJECT_H : 0;
+        if (skin.cbuttons != null) {
+            SkinPaint.sprite(c, skin.cbuttons, 114, row, SkinLayout.EJECT_W,
+                    SkinLayout.EJECT_H, SkinLayout.EJECT_X, SkinLayout.EJECT_Y, plain);
+        }
     }
 
-    private void drawShadedTitle(Canvas canvas) {
-        Track track = engine.currentTrack();
-        String title = track == null ? "WACUP Mobile" : track.title;
-        green.setColor(skin.isBase ? 0xFF00F800 : skin.plNormal);
-        canvas.save();
-        canvas.clipRect(4, 3, SkinLayout.MAIN_W - 60, SkinLayout.TITLE_HEIGHT - 1);
-        skinPaint.drawText(canvas, title, 6, 4, green, SkinLayout.MAIN_W);
-        canvas.restore();
-        skinPaint.drawTime(canvas, engine.timeLabel(), SkinLayout.MAIN_W - 52, 1,
-                green);
-    }
+    // ------------------------------------------------------------ windowshade
 
-    /** The EQ and PL buttons in the bottom-left of the classic main window. */
-    private void drawWindowToggles(Canvas canvas) {
-        boolean haveArt = skin.shufrep != null && skin.shufrep.getHeight() >= 85
-                && skin.shufrep.getWidth() >= 46;
-        if (haveArt) {
-            SkinPaint.sprite(canvas, skin.shufrep, 0, eqOpen ? 73 : 61,
-                    SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H,
-                    SkinLayout.EQ_BUTTON_X, SkinLayout.EQ_BUTTON_Y, plain);
-            SkinPaint.sprite(canvas, skin.shufrep, 23, plOpen ? 73 : 61,
-                    SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H,
-                    SkinLayout.PL_BUTTON_X, SkinLayout.PL_BUTTON_Y, plain);
-            return;
+    private void drawShade(Canvas c) {
+        plain.setColor(0xFF2E2E2E);
+        c.drawRect(0, 0, SkinLayout.MAIN_W, SkinLayout.SHADE_H, plain);
+
+        if (skin.titlebar != null) {
+            int row = 29;   // active windowshade bar
+            if (skin.titlebar.getHeight() < row + SkinLayout.SHADE_H) row = 0;
+            SkinPaint.sprite(c, skin.titlebar, 27, row, SkinLayout.MAIN_W,
+                    SkinLayout.SHADE_H, 0, 0, plain);
+            SkinPaint.sprite(c, skin.titlebar, 0, 18, 9, 9, SkinLayout.SHADE_X,
+                    SkinLayout.TITLE_BUTTON_Y, plain);
+            SkinPaint.sprite(c, skin.titlebar, 18, 0, 9, 9, SkinLayout.CLOSE_X,
+                    SkinLayout.TITLE_BUTTON_Y, plain);
         }
 
-        drawToggleLabel(canvas, SkinLayout.EQ_BUTTON_X, SkinLayout.EQ_BUTTON_Y, "EQ", eqOpen);
-        drawToggleLabel(canvas, SkinLayout.PL_BUTTON_X, SkinLayout.PL_BUTTON_Y, "PL", plOpen);
-    }
+        // transport buttons, squeezed into the bar
+        for (int i = 0; i < SkinLayout.SHADE_BUTTON_X.length; i++) {
+            int x = SkinLayout.SHADE_BUTTON_X[i];
+            int w = SkinLayout.SHADE_BUTTON_W[i];
+            if (skin.cbuttons == null) continue;
+            int srcX = i < 5 ? SkinLayout.CBUTTONS_X[i] : 114;
+            int srcW = i < 5 ? SkinLayout.CBUTTONS_W[i] : SkinLayout.EJECT_W;
+            int srcY = i < 5 ? (pressedButton == i ? 18 : 0)
+                    : (pressedButton == SkinLayout.EJECT ? SkinLayout.EJECT_H : 0);
+            int srcH = i < 5 ? SkinLayout.CBUTTONS_H : SkinLayout.EJECT_H;
+            c.save();
+            c.clipRect(x, SkinLayout.SHADE_BUTTON_Y, x + w,
+                    SkinLayout.SHADE_BUTTON_Y + SkinLayout.SHADE_BUTTON_H);
+            SkinPaint.sprite(c, skin.cbuttons, srcX, srcY, srcW, srcH, x,
+                    SkinLayout.SHADE_BUTTON_Y - 1, plain);
+            c.restore();
+        }
 
-    private void drawToggleLabel(Canvas canvas, int x, int y, String label, boolean on) {
-        plain.setColor(on ? 0xFF0E3A0E : 0xFF1C1C1C);
-        canvas.drawRect(x, y, x + SkinLayout.TOGGLE_W, y + SkinLayout.TOGGLE_H, plain);
-        plain.setColor(on ? 0xFF00A000 : 0xFF2C2C2C);
-        canvas.drawRect(x, y, x + SkinLayout.TOGGLE_W, y + 1, plain);
-        green.setColor(on ? 0xFF00F800 : 0xFF007000);
-        skinPaint.drawText(canvas, label, x + 3, y + 3, green, SkinLayout.TOGGLE_W - 4);
+        skinPaint.drawText(c, engine.timeLabel(), SkinLayout.SHADE_TIME_X,
+                SkinLayout.SHADE_TIME_Y, skin.plNormal, 60);
+
+        // compact seek bar
+        if (skin.posbar != null) {
+            SkinPaint.sprite(c, skin.posbar, 0, 0, SkinLayout.SHADE_POSBAR_W,
+                    SkinLayout.SHADE_POSBAR_H, SkinLayout.SHADE_POSBAR_X,
+                    SkinLayout.SHADE_POSBAR_Y, plain);
+        }
+        int travel = SkinLayout.SHADE_POSBAR_W - 3;
+        int thumbX = SkinLayout.SHADE_POSBAR_X + Math.round(travel * engine.positionFraction());
+        plain.setColor(0xFFE0E0E0);
+        c.drawRect(thumbX, SkinLayout.SHADE_POSBAR_Y, thumbX + 3,
+                SkinLayout.SHADE_POSBAR_Y + SkinLayout.SHADE_POSBAR_H, plain);
     }
 
     // ------------------------------------------------------------------ input
+
+    /** True when a down event lands on one of the title bar buttons. */
+    public boolean isTitleButton(float skinX, float skinY) {
+        if (skinY > SkinLayout.TITLE_H) return false;
+        return near(skinX, SkinLayout.OPTIONS_X) || near(skinX, SkinLayout.MINIMIZE_X)
+                || near(skinX, SkinLayout.SHADE_X) || near(skinX, SkinLayout.CLOSE_X);
+    }
+
+    private boolean near(float x, int buttonX) {
+        return x >= buttonX - 2 && x <= buttonX + SkinLayout.TITLE_BUTTON + 2;
+    }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         float x = event.getX() / scale;
         float y = event.getY() / scale;
+        float maxY = shaded ? SkinLayout.SHADE_H : SkinLayout.MAIN_H;
+        if (y > maxY) y = maxY;
 
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                if (insideButton(x, y) >= 0) {
-                    pressedButton = insideButton(x, y);
+                pressedTitle = titleButtonAt(x, y);
+                if (pressedTitle >= 0) {
                     invalidate();
                     return true;
                 }
-                if (insideRect(x, y, SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y,
-                        SkinLayout.POSBAR_W, SkinLayout.POSBAR_H)) {
-                    draggingSeek = true;
-                    seekTo(x);
+                if (shaded) {
+                    pressedButton = shadeButtonAt(x, y);
+                    if (pressedButton < 0 && inside(x, y, SkinLayout.SHADE_POSBAR_X,
+                            SkinLayout.SHADE_POSBAR_Y, SkinLayout.SHADE_POSBAR_W,
+                            SkinLayout.SHADE_POSBAR_H)) {
+                        draggedSlider = 0;
+                        seekFraction((x - SkinLayout.SHADE_POSBAR_X) / SkinLayout.SHADE_POSBAR_W);
+                    }
+                    invalidate();
                     return true;
                 }
-                if (insideRect(x, y, SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y,
-                        SkinLayout.VOLUME_W, SkinLayout.VOLUME_H)) {
-                    draggingVolume = true;
-                    setVolume(x);
+
+                pressedButton = transportAt(x, y);
+                if (pressedButton >= 0) {
+                    invalidate();
+                    return true;
+                }
+                if (inside(x, y, SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y,
+                        SkinLayout.POSBAR_W, SkinLayout.POSBAR_H)) {
+                    draggedSlider = 0;
+                    seekFraction((x - SkinLayout.POSBAR_X) / SkinLayout.POSBAR_W);
+                    return true;
+                }
+                if (inside(x, y, SkinLayout.VOLUME_X, SkinLayout.VOLUME_Y,
+                        SkinLayout.VOLUME_W, SkinLayout.SLIDER_H)) {
+                    draggedSlider = 1;
+                    volumeFraction((x - SkinLayout.VOLUME_X) / SkinLayout.VOLUME_W);
+                    return true;
+                }
+                if (inside(x, y, SkinLayout.BALANCE_X, SkinLayout.BALANCE_Y,
+                        SkinLayout.BALANCE_W, SkinLayout.SLIDER_H)) {
+                    draggedSlider = 2;
+                    balanceFraction((x - SkinLayout.BALANCE_X) / SkinLayout.BALANCE_W);
                     return true;
                 }
                 return true;
 
             case MotionEvent.ACTION_MOVE:
-                if (draggingSeek) {
-                    seekTo(x);
+                if (draggedSlider == 0) {
+                    float fraction = shaded
+                            ? (x - SkinLayout.SHADE_POSBAR_X) / SkinLayout.SHADE_POSBAR_W
+                            : (x - SkinLayout.POSBAR_X) / SkinLayout.POSBAR_W;
+                    seekFraction(fraction);
                     return true;
                 }
-                if (draggingVolume) {
-                    setVolume(x);
+                if (draggedSlider == 1) {
+                    volumeFraction((x - SkinLayout.VOLUME_X) / SkinLayout.VOLUME_W);
+                    return true;
+                }
+                if (draggedSlider == 2) {
+                    balanceFraction((x - SkinLayout.BALANCE_X) / SkinLayout.BALANCE_W);
                     return true;
                 }
                 return true;
 
             case MotionEvent.ACTION_UP:
+                if (pressedTitle >= 0) {
+                    int which = pressedTitle;
+                    pressedTitle = -1;
+                    if (callbacks != null && titleButtonAt(x, y) == which) {
+                        callbacks.onTitleButton(which);
+                    }
+                    invalidate();
+                    return true;
+                }
+                if (draggedSlider >= 0) {
+                    draggedSlider = -1;
+                    invalidate();
+                    return true;
+                }
                 if (pressedButton >= 0) {
                     int button = pressedButton;
                     pressedButton = -1;
                     invalidate();
-                    dispatchButton(button, x, y);
+                    if (shaded) {
+                        dispatchTransport(button);
+                        return true;
+                    }
+                    dispatchTransport(button);
                     return true;
                 }
-                if (draggingSeek || draggingVolume) {
-                    draggingSeek = false;
-                    draggingVolume = false;
-                    return true;
-                }
-                if (insideRect(x, y, SkinLayout.EQ_BUTTON_X, SkinLayout.EQ_BUTTON_Y,
-                        SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H)) {
-                    if (callbacks != null) callbacks.onToggleEq();
-                    return true;
-                }
-                if (insideRect(x, y, SkinLayout.PL_BUTTON_X, SkinLayout.PL_BUTTON_Y,
-                        SkinLayout.TOGGLE_W, SkinLayout.TOGGLE_H)) {
-                    if (callbacks != null) callbacks.onTogglePlaylist();
-                    return true;
-                }
-                if (insideRect(x, y, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y,
-                        SkinLayout.SHUFREP_W, SkinLayout.SHUFREP_H)) {
-                    if (callbacks != null) callbacks.onShuffle();
-                    return true;
-                }
-                if (insideRect(x, y, SkinLayout.REPEAT_X, SkinLayout.REPEAT_Y,
-                        SkinLayout.SHUFREP_W, SkinLayout.SHUFREP_H)) {
-                    if (callbacks != null) callbacks.onRepeat();
-                    return true;
-                }
-                if (y < SkinLayout.TITLE_HEIGHT * 2 && callbacks != null) {
-                    callbacks.onMenu();
-                    return true;
-                }
+                if (tapButtons(x, y)) return true;
                 return true;
 
             case MotionEvent.ACTION_CANCEL:
                 pressedButton = -1;
-                draggingSeek = false;
-                draggingVolume = false;
+                pressedTitle = -1;
+                draggedSlider = -1;
                 invalidate();
                 return true;
 
@@ -409,36 +496,97 @@ public class MainWindowView extends SkinSurface {
         }
     }
 
-    private void dispatchButton(int button, float x, float y) {
+    /** Taps on shuffle / repeat / eq / playlist, resolved on release. */
+    private boolean tapButtons(float x, float y) {
+        if (callbacks == null) return false;
+        if (inside(x, y, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y,
+                SkinLayout.SHUFFLE_W, SkinLayout.SHUFREP_H)) {
+            callbacks.onShuffle();
+            return true;
+        }
+        if (inside(x, y, SkinLayout.REPEAT_X, SkinLayout.SHUFFLE_Y,
+                SkinLayout.REPEAT_W, SkinLayout.SHUFREP_H)) {
+            callbacks.onRepeat();
+            return true;
+        }
+        if (inside(x, y, SkinLayout.EQ_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y,
+                SkinLayout.WINDOW_BUTTON_W, SkinLayout.WINDOW_BUTTON_H)) {
+            callbacks.onToggleEqWindow();
+            return true;
+        }
+        if (inside(x, y, SkinLayout.PL_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y,
+                SkinLayout.WINDOW_BUTTON_W, SkinLayout.WINDOW_BUTTON_H)) {
+            callbacks.onTogglePlaylistWindow();
+            return true;
+        }
+        return false;
+    }
+
+    private void dispatchTransport(int button) {
         if (callbacks == null) return;
-        // The transport row is small; treat any tap in the row as the nearest button.
         callbacks.onTransport(button);
     }
 
-    private int insideButton(float x, float y) {
-        if (y < SkinLayout.CBUTTONS_Y - 3 || y > SkinLayout.CBUTTONS_Y + SkinLayout.CBUTTONS_H + 3) {
-            return -1;
-        }
-        for (int i = 0; i < BUTTON_COUNT; i++) {
-            int bx = SkinLayout.CBUTTONS_X[i];
-            int bw = SkinLayout.CBUTTONS_W[i];
-            if (x >= bx - 2 && x <= bx + bw + 2) return i;
+    private int titleButtonAt(float x, float y) {
+        if (y > SkinLayout.TITLE_H) return -1;
+        if (near(x, SkinLayout.OPTIONS_X)) return TITLE_OPTIONS;
+        if (near(x, SkinLayout.MINIMIZE_X)) return TITLE_MINIMIZE;
+        if (near(x, SkinLayout.SHADE_X)) return TITLE_SHADE;
+        if (near(x, SkinLayout.CLOSE_X)) return TITLE_CLOSE;
+        return -1;
+    }
+
+    private int transportAt(float x, float y) {
+        int[] xs = shaded ? SkinLayout.SHADE_BUTTON_X : append(SkinLayout.CBUTTONS_X,
+                SkinLayout.EJECT_X);
+        int[] ws = shaded ? SkinLayout.SHADE_BUTTON_W : append(SkinLayout.CBUTTONS_W,
+                SkinLayout.EJECT_W);
+        float ty = shaded ? SkinLayout.SHADE_BUTTON_Y : SkinLayout.CBUTTONS_Y;
+        float th = shaded ? SkinLayout.SHADE_BUTTON_H : SkinLayout.CBUTTONS_H;
+        if (y < ty - 4 || y > ty + th + 4) return -1;
+        for (int i = 0; i < xs.length; i++) {
+            if (x >= xs[i] - 2 && x <= xs[i] + ws[i] + 2) {
+                return i == 5 ? SkinLayout.EJECT : i;
+            }
         }
         return -1;
     }
 
-    private boolean insideRect(float x, float y, int rx, int ry, int rw, int rh) {
+    private static int[] append(int[] values, int extra) {
+        int[] out = new int[values.length + 1];
+        System.arraycopy(values, 0, out, 0, values.length);
+        out[values.length] = extra;
+        return out;
+    }
+
+    private int shadeButtonAt(float x, float y) {
+        for (int i = 0; i < SkinLayout.SHADE_BUTTON_X.length; i++) {
+            if (inside(x, y, SkinLayout.SHADE_BUTTON_X[i] - 1, SkinLayout.SHADE_BUTTON_Y - 2,
+                    SkinLayout.SHADE_BUTTON_W[i] + 2, SkinLayout.SHADE_BUTTON_H + 4)) {
+                return i == 5 ? SkinLayout.EJECT : i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean inside(float x, float y, int rx, int ry, int rw, int rh) {
         return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
     }
 
-    private void seekTo(float x) {
-        float fraction = (x - SkinLayout.POSBAR_X) / (float) SkinLayout.POSBAR_W;
-        if (callbacks != null) callbacks.onSeek(Math.max(0f, Math.min(1f, fraction)));
+    private void seekFraction(float fraction) {
+        if (callbacks != null) callbacks.onSeek(clamp(fraction));
     }
 
-    private void setVolume(float x) {
-        float fraction = (x - SkinLayout.VOLUME_X) / (float) SkinLayout.VOLUME_W;
-        int percent = Math.round(Math.max(0f, Math.min(1f, fraction)) * 100f);
-        if (callbacks != null) callbacks.onVolume(percent);
+    private void volumeFraction(float fraction) {
+        if (callbacks != null) callbacks.onSlider(true, clamp(fraction));
+    }
+
+    private void balanceFraction(float fraction) {
+        balance = clamp(fraction);
+        invalidate();
+    }
+
+    private static float clamp(float v) {
+        return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 }

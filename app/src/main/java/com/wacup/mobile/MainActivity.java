@@ -2,6 +2,8 @@ package com.wacup.mobile;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -11,7 +13,6 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.view.View;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -20,27 +21,43 @@ import android.widget.Toast;
 import com.wacup.mobile.playlist.Playlist;
 import com.wacup.mobile.playlist.Track;
 import com.wacup.mobile.skin.Skin;
+import com.wacup.mobile.ui.DesktopLayout;
 import com.wacup.mobile.ui.EqWindowView;
 import com.wacup.mobile.ui.FileBrowser;
 import com.wacup.mobile.ui.MainWindowView;
 import com.wacup.mobile.ui.PlaylistWindowView;
-import com.wacup.mobile.ui.DesktopLayout;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Hosts the three skin windows. There is no Material UI here on purpose: the app is
- * the skin, and every command lives on the skin's own controls (tap the title bar
- * for the menu).
+ * Hosts the Winamp-style windows. There is no Material UI by design: the skin is
+ * the UI, and every command is reachable from the windows themselves.
  */
-public class MainActivity extends Activity implements MusicEngine.Listener,
+public class MainActivity extends Activity implements
+        MusicEngine.Listener,
         MainWindowView.Callbacks,
-        PlaylistWindowView.Callbacks,
         EqWindowView.Callbacks,
+        PlaylistWindowView.Callbacks,
         DesktopLayout.Listener {
 
     private static final int REQ_STORAGE = 1;
+
+    private static final String[] PRESETS = {
+            "Flat", "Rock", "Pop", "Jazz", "Classical", "Dance", "Bass", "Treble", "Vocal"
+    };
+    private static final float[][] PRESET_GAINS = {
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+            {5, 4, 3, 1, -1, -1, 0, 2, 3, 4},
+            {-1, 2, 4, 4, 1, -1, -1, 1, 2, 2},
+            {3, 2, 1, 2, -1, -1, 0, 1, 2, 3},
+            {4, 3, 2, 1, -1, -1, 0, 2, 3, 4},
+            {6, 5, 2, 0, 0, -2, -3, -3, 0, 1},
+            {7, 6, 4, 2, 0, 0, 0, 0, 0, 0},
+            {-3, -2, 0, 1, 2, 3, 4, 5, 6, 6},
+            {-2, -1, 0, 2, 4, 4, 3, 1, 0, -1}
+    };
 
     private MusicEngine engine;
     private Skin skin;
@@ -65,8 +82,8 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            // Same mechanism Google Maps uses while navigating: our own window is
-            // allowed to draw over the keyguard, without unlocking the device.
+            // The same mechanism Google Maps uses: our own window may draw over the
+            // keyguard without unlocking the device.
             setShowWhenLocked(true);
             setTurnScreenOn(true);
         }
@@ -77,16 +94,16 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         mainWindow = new MainWindowView(this, engine);
         eqWindow = new EqWindowView(this, engine);
         playlistWindow = new PlaylistWindowView(this, engine);
-        playlistWindow.setVisibleRows(6);
 
         mainWindow.setCallbacks(this);
-        playlistWindow.setCallbacks(this);
         eqWindow.setCallbacks(this);
+        playlistWindow.setCallbacks(this);
 
         layout = new DesktopLayout(this, mainWindow, eqWindow, playlistWindow);
         layout.setListener(this);
+
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(0xFF101010);
+        root.setBackgroundColor(0xFF0B0B0B);
         root.addView(layout, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -122,7 +139,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         try {
             startService(new Intent(this, PlaybackService.class));
         } catch (Exception ignored) {
-            // Playback still works without the session; only the notification is lost.
+            // Playback works without the session; only the notification is lost.
         }
     }
 
@@ -141,7 +158,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     private void applySkin(Skin newSkin) {
-        this.skin = newSkin;
+        skin = newSkin;
         mainWindow.setSkin(newSkin);
         eqWindow.setSkin(newSkin);
         playlistWindow.setSkin(newSkin);
@@ -159,8 +176,6 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         if (last == null || !last.isFile()) return;
         try {
             Playlist loaded = Playlist.read(last);
-            engine.playlist().clear();
-            engine.playlist().addAll(loaded.tracks);
             engine.setQueue(loaded.tracks, 0);
             playlistWindow.invalidate();
         } catch (Exception e) {
@@ -168,7 +183,12 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         }
     }
 
-    // --------------------------------------------------------------- commands
+    private void syncWindowState() {
+        mainWindow.setWindowState(layout.isWindowVisible(DesktopLayout.EQ),
+                layout.isWindowVisible(DesktopLayout.PLAYLIST));
+    }
+
+    // ------------------------------------------------------- main window input
 
     @Override
     public void onTransport(int button) {
@@ -190,88 +210,23 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     @Override
-    public void onVolume(int percent) {
-        engine.setVolumePercent(percent);
-        refreshWindows();
+    public void onSlider(boolean volume, float fraction) {
+        if (volume) {
+            engine.setVolumePercent(Math.round(fraction * 100f));
+            refreshWindows();
+        }
     }
 
     @Override
-    public void onToggleEq() {
+    public void onToggleEqWindow() {
         layout.toggleWindow(DesktopLayout.EQ);
         syncWindowState();
     }
 
     @Override
-    public void onTogglePlaylist() {
+    public void onTogglePlaylistWindow() {
         layout.toggleWindow(DesktopLayout.PLAYLIST);
         syncWindowState();
-    }
-
-    private void syncWindowState() {
-        mainWindow.setWindowState(layout.isWindowVisible(DesktopLayout.EQ),
-                layout.isWindowVisible(DesktopLayout.PLAYLIST));
-    }
-
-    // ------------------------------------------------------- window management
-
-    @Override
-    public void onTitleTap(int kind) {
-        if (kind == DesktopLayout.MAIN) {
-            showMenu();
-        } else {
-            showWindowsMenu();
-        }
-    }
-
-    @Override
-    public void onToggleShade(int kind) {
-        if (kind == DesktopLayout.MAIN) {
-            layout.setShaded(kind, !layout.isShaded(kind));
-            toast(layout.isShaded(kind) ? "Windowshade" : "Window expanded");
-        }
-    }
-
-    @Override
-    public void onWindowMoved() {
-        // Positions are persisted by the layout.
-    }
-
-    private void showWindowsMenu() {
-        final boolean[] checked = {
-                layout.isWindowVisible(DesktopLayout.EQ),
-                layout.isWindowVisible(DesktopLayout.PLAYLIST)
-        };
-        final String[] names = {"Equaliser window", "Playlist window"};
-
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Windows")
-                .setMultiChoiceItems(names, checked,
-                        new android.content.DialogInterface.OnMultiChoiceClickListener() {
-                            @Override
-                            public void onClick(android.content.DialogInterface d, int which,
-                                                boolean isChecked) {
-                                int kind = which == 0 ? DesktopLayout.EQ : DesktopLayout.PLAYLIST;
-                                layout.setWindowVisible(kind, isChecked);
-                                syncWindowState();
-                            }
-                        })
-                .setPositiveButton("Done", null)
-                .setNeutralButton(layout.isShaded(DesktopLayout.MAIN) ? "Expand" : "Shade",
-                        new android.content.DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(android.content.DialogInterface d, int which) {
-                                layout.setShaded(DesktopLayout.MAIN,
-                                        !layout.isShaded(DesktopLayout.MAIN));
-                            }
-                        })
-                .setNegativeButton("Reset layout", new android.content.DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        layout.resetPositions();
-                        toast("Window positions reset");
-                    }
-                })
-                .show();
     }
 
     @Override
@@ -287,6 +242,62 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     @Override
+    public void onMenu() {
+        showMenu();
+    }
+
+    @Override
+    public void onTitleButton(int which) {
+        switch (which) {
+            case MainWindowView.TITLE_SHADE:
+                layout.setShaded(DesktopLayout.MAIN,
+                        !layout.isShaded(DesktopLayout.MAIN));
+                break;
+            case MainWindowView.TITLE_MINIMIZE:
+                layout.setWindowVisible(DesktopLayout.PLAYLIST, false);
+                layout.setWindowVisible(DesktopLayout.EQ, false);
+                syncWindowState();
+                toast("Windows hidden — tap the title bar to bring them back");
+                break;
+            case MainWindowView.TITLE_CLOSE:
+                showMenu();
+                break;
+            default:
+                showMenu();
+                break;
+        }
+    }
+
+    // --------------------------------------------------- equaliser window input
+
+    @Override
+    public void onToggleEqEnabled() {
+        engine.toggleEq();
+        eqWindow.invalidate();
+    }
+
+    @Override
+    public void onPresetMenu() {
+        new AlertDialog.Builder(this)
+                .setTitle("Equaliser preset")
+                .setItems(PRESETS, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        for (int band = 0; band < PRESET_GAINS[which].length; band++) {
+                            engine.setBandGain(band, PRESET_GAINS[which][band]);
+                        }
+                        if (!engine.eqEnabled()) engine.setEqEnabled(true);
+                        eqWindow.invalidate();
+                        toast(PRESETS[which]);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ---------------------------------------------------- playlist window input
+
+    @Override
     public void onPlayTrack(int index) {
         if (index < 0 || index >= engine.playlist().size()) return;
         engine.playIndex(index);
@@ -297,24 +308,23 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     public void onTrackMenu(final int index) {
         final Track track = engine.playlist().get(index);
         if (track == null) return;
-        new android.app.AlertDialog.Builder(this)
+        new AlertDialog.Builder(this)
                 .setTitle(track.title)
-                .setItems(new String[]{"Play", "Remove from playlist", "Show file name"},
-                        new android.content.DialogInterface.OnClickListener() {
+                .setItems(new String[]{"Play", "Remove from playlist", "Show file path"},
+                        new DialogInterface.OnClickListener() {
                             @Override
-                            public void onClick(android.content.DialogInterface d, int which) {
+                            public void onClick(DialogInterface d, int which) {
                                 if (which == 0) {
                                     engine.playIndex(index);
                                 } else if (which == 1) {
-                                    boolean wasCurrent = index == engine.currentIndex();
                                     engine.playlist().removeAt(index);
                                     if (engine.playlist().size() == 0) {
                                         engine.stop();
-                                        engine.setQueue(new java.util.ArrayList<Track>(), 0);
+                                        engine.setQueue(new ArrayList<Track>(), 0);
                                     } else {
                                         engine.setQueue(engine.playlist().tracks,
-                                                Math.max(0, Math.min(index, engine.playlist().size() - 1)));
-                                        if (!wasCurrent) return;
+                                                Math.max(0, Math.min(index,
+                                                        engine.playlist().size() - 1)));
                                     }
                                     toast("Removed");
                                 } else {
@@ -327,19 +337,37 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     @Override
-    public void onToggleEqEnabled() {
-        engine.toggleEq();
-        refreshWindows();
-    }
-
-    @Override
-    public void onCyclePreset() {
-        eqWindow.nextPreset();
-    }
-
-    @Override
-    public void onMenu() {
+    public void onListMenu() {
         showMenu();
+    }
+
+    // ------------------------------------------------------ desktop window mgmt
+
+    @Override
+    public void onTitleTap(int kind) {
+        if (kind == DesktopLayout.MAIN) {
+            showMenu();
+        } else {
+            showWindowsMenu();
+        }
+    }
+
+    @Override
+    public void onToggleShade(int kind) {
+        layout.setShaded(kind, !layout.isShaded(kind));
+        if (kind == DesktopLayout.MAIN) {
+            toast(layout.isShaded(kind) ? "Windowshade" : "Expanded");
+        }
+    }
+
+    @Override
+    public void onWindowMoved() {
+        // persisted by the layout
+    }
+
+    @Override
+    public void onFitChanged(boolean autoFit) {
+        toast(autoFit ? "Auto-fit on" : "Free positioning — drag windows anywhere");
     }
 
     @Override
@@ -347,27 +375,74 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         refreshWindows();
     }
 
-    // ------------------------------------------------------------------- menu
+    // ------------------------------------------------------------------- menus
+
+    private void showWindowsMenu() {
+        final boolean[] checked = {
+                layout.isWindowVisible(DesktopLayout.EQ),
+                layout.isWindowVisible(DesktopLayout.PLAYLIST),
+                layout.isAutoFit()
+        };
+        final String[] names = {"Equaliser", "Playlist", "Auto-fit to screen"};
+
+        new AlertDialog.Builder(this)
+                .setTitle("Windows")
+                .setMultiChoiceItems(names, checked,
+                        new DialogInterface.OnMultiChoiceClickListener() {
+                            @Override
+                            public void onClick(DialogInterface d, int which, boolean on) {
+                                if (which == 2) {
+                                    if (on) {
+                                        layout.fitToScreen();
+                                    } else {
+                                        toast("Drag a title bar to place windows");
+                                    }
+                                    return;
+                                }
+                                layout.setWindowVisible(
+                                        which == 0 ? DesktopLayout.EQ : DesktopLayout.PLAYLIST, on);
+                                syncWindowState();
+                            }
+                        })
+                .setPositiveButton("Done", null)
+                .setNeutralButton("Fit now", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        layout.fitToScreen();
+                        toast("Windows re-arranged");
+                    }
+                })
+                .setNegativeButton("Reset", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        layout.resetPositions();
+                        toast("Layout reset");
+                    }
+                })
+                .show();
+    }
 
     private void showMenu() {
-        final String[] items = {
+        String[] items = {
                 "Add files…",
                 "Add folder…",
                 "Load playlist (.m3u / .pls)…",
                 "Save playlist…",
                 "Load skin (.wsz)…",
                 "Use built-in skin",
-                "Clear playlist",
+                "Load included sample skin",
                 "Windows…",
+                "Equaliser preset…",
+                "Clear playlist",
                 "Grant all-files access",
                 "About"
         };
 
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("WACUP Mobile")
-                .setItems(items, new android.content.DialogInterface.OnClickListener() {
+        new AlertDialog.Builder(this)
+                .setTitle(skin.name)
+                .setItems(items, new DialogInterface.OnClickListener() {
                     @Override
-                    public void onClick(android.content.DialogInterface dialog, int which) {
+                    public void onClick(DialogInterface dialog, int which) {
                         switch (which) {
                             case 0: addFiles(); break;
                             case 1: addFolder(); break;
@@ -375,9 +450,11 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                             case 3: savePlaylist(); break;
                             case 4: loadSkin(); break;
                             case 5: useBaseSkin(); break;
-                            case 6: clearPlaylist(); break;
+                            case 6: loadSampleSkin(); break;
                             case 7: showWindowsMenu(); break;
-                            case 8: requestAllFiles(); break;
+                            case 8: onPresetMenu(); break;
+                            case 9: clearPlaylist(); break;
+                            case 10: requestAllFiles(); break;
                             default: showAbout(); break;
                         }
                     }
@@ -390,7 +467,9 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
             @Override
             public void onFile(File file) {
                 if (file == null) return;
-                addTracks(java.util.Collections.singletonList(Track.of(file)), false);
+                List<Track> one = new ArrayList<>();
+                one.add(Track.of(file));
+                addTracks(one);
                 engine.setLastFolder(file.getParentFile());
             }
         });
@@ -407,17 +486,17 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                     toast("No audio files in " + dir.getName());
                     return;
                 }
-                addTracks(found, engine.playlist().size() == 0);
+                addTracks(found);
             }
         });
     }
 
-    private void addTracks(List<Track> tracks, boolean autoPlay) {
+    private void addTracks(List<Track> tracks) {
         boolean wasEmpty = engine.playlist().size() == 0;
-        engine.playlist().addAll(tracks);
-        int start = wasEmpty ? 0 : engine.currentIndex();
-        engine.setQueue(engine.playlist().tracks, Math.max(0, start));
-        if (autoPlay && wasEmpty) engine.playIndex(0);
+        List<Track> all = new ArrayList<>(engine.playlist().tracks);
+        all.addAll(tracks);
+        engine.setQueue(all, wasEmpty ? 0 : engine.currentIndex());
+        if (wasEmpty) engine.playIndex(0);
         toast(tracks.size() + " track(s) added");
         refreshWindows();
     }
@@ -436,7 +515,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                     engine.setQueue(loaded.tracks, 0);
                     engine.setLastPlaylist(file);
                     engine.setLastFolder(file.getParentFile());
-                    toast(loaded.size() + " tracks loaded from " + file.getName());
+                    toast(loaded.size() + " tracks from " + file.getName());
                     refreshWindows();
                 } catch (Exception e) {
                     toast("Could not read playlist: " + e.getMessage());
@@ -452,12 +531,12 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         }
         final EditText input = new EditText(this);
         input.setText("wacup-playlist.m3u");
-        new android.app.AlertDialog.Builder(this)
+        new AlertDialog.Builder(this)
                 .setTitle("Save playlist as")
                 .setView(input)
-                .setPositiveButton("Save", new android.content.DialogInterface.OnClickListener() {
+                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
                     @Override
-                    public void onClick(android.content.DialogInterface dialog, int which) {
+                    public void onClick(DialogInterface dialog, int which) {
                         String name = input.getText().toString().trim();
                         if (name.isEmpty()) name = "wacup-playlist.m3u";
                         if (!name.contains(".")) name = name + ".m3u";
@@ -496,6 +575,18 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         });
     }
 
+    /** The .wsz bundled in assets/, handy before any files have been copied over. */
+    private void loadSampleSkin() {
+        try {
+            Skin sample = Skin.fromAssets(this, "haruhi-suzumiya.wsz");
+            applySkin(sample);
+            engine.setLastSkin(null);
+            toast("Sample skin loaded");
+        } catch (Exception e) {
+            toast("Sample skin failed: " + e.getMessage());
+        }
+    }
+
     private void useBaseSkin() {
         applySkin(Skin.base());
         engine.setLastSkin(null);
@@ -504,8 +595,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
 
     private void clearPlaylist() {
         engine.stop();
-        engine.playlist().clear();
-        engine.setQueue(new java.util.ArrayList<Track>(), 0);
+        engine.setQueue(new ArrayList<Track>(), 0);
         refreshWindows();
     }
 
@@ -517,7 +607,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
                         Uri.parse("package:" + getPackageName())));
                 return;
             } catch (Exception ignored) {
-                // fall through to the generic screen
+                // fall through
             }
             startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
         } else {
@@ -526,16 +616,17 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     }
 
     private void showAbout() {
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("WACUP Mobile 0.1")
-                .setMessage("A native Android player built around classic Winamp 2.x skins.\n\n"
-                        + "• Load .wsz skins from any folder\n"
-                        + "• Reads and writes .m3u / .m3u8 / .pls playlists\n"
-                        + "• 10-band equaliser\n"
-                        + "• Media notification, lock-screen and Bluetooth controls\n\n"
+        new AlertDialog.Builder(this)
+                .setTitle("WACUP Mobile 0.2")
+                .setMessage("A native Android player built on classic Winamp 2.x skins.\n\n"
+                        + "• Floating windows: drag by the title bar, double-tap to roll up\n"
+                        + "• Auto-fit keeps every window on screen; drag to place freely\n"
+                        + "• Skins from any folder: .wsz / .zip\n"
+                        + "• .m3u / .m3u8 / .pls in and out\n"
+                        + "• 10-band equaliser + presets\n"
+                        + "• Media notification, lock screen, Bluetooth\n\n"
                         + "Skin: " + skin.name + "\n"
-                        + "Not affiliated with Winamp, WACUP or Llama Group. "
-                        + "Skins are the property of their authors.")
+                        + "Not affiliated with Winamp, WACUP or Llama Group.")
                 .setPositiveButton(android.R.string.ok, null)
                 .show();
     }
@@ -557,8 +648,7 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_STORAGE && grantResults.length > 0
                 && grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-            toast("Without storage access only the app folder is browsable — "
-                    + "use \"Grant all-files access\" in the menu");
+            toast("Use \"Grant all-files access\" in the menu to browse all folders");
         }
     }
 
@@ -570,6 +660,11 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     public void onBackPressed() {
         if (layout.isWindowVisible(DesktopLayout.PLAYLIST)) {
             layout.setWindowVisible(DesktopLayout.PLAYLIST, false);
+            syncWindowState();
+            return;
+        }
+        if (layout.isWindowVisible(DesktopLayout.EQ)) {
+            layout.setWindowVisible(DesktopLayout.EQ, false);
             syncWindowState();
             return;
         }
