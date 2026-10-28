@@ -63,6 +63,12 @@ public class MainActivity extends Activity implements MusicEngine.Listener,
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // Same mechanism Google Maps uses while navigating: our own window is
+            // allowed to draw over the keyguard, without unlocking the device.
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
 
         engine = MusicEngine.get(this);
         engine.addListener(this);
