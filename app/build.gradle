@@ -29,7 +29,7 @@ android {
     sourceSets {
         main {
             // The sample skin doubles as a smoke test for the skin engine.
-            assets.srcDirs += ['../../samples']
+            assets.srcDirs += ['../samples']
         }
     }
 

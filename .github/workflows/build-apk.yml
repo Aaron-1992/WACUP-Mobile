@@ -42,18 +42,18 @@ jobs:
           set -o pipefail
           gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
 
-      # The Actions log endpoint is not reachable from every environment, so a
-      # failing build publishes its log as a release asset instead.
-      - name: Publish build log on failure
+      # Actions logs and release assets redirect to hosts that some environments
+      # cannot reach, so a failing build commits its log into the branch instead.
+      - name: Commit build log on failure
         if: failure()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-log
-          name: Last failing build log
-          body: Compiler output for `${{ github.sha }}`.
-          files: build.log
-          prerelease: true
-          make_latest: false
+        run: |
+          mkdir -p ci
+          cp build.log ci/last-failure.log || true
+          git config user.name "wacup-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add ci/last-failure.log
+          git commit -m "ci: build log from ${{ github.sha }} [skip ci]" || true
+          git push origin HEAD:${{ github.ref_name }} || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
