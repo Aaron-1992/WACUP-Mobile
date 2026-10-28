@@ -1,9 +1,0 @@
-name: smoke
-on:
-  push:
-    branches: [arena/8cc0a29a-wacup-mobile]
-jobs:
-  hello:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo hello && uname -a
