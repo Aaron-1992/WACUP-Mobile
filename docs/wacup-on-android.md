@@ -90,3 +90,34 @@ zero reimplementation, but it is packaging, not software.
 **D. Spec + prototype only**
 Document the classic-skin file format and build a renderer test harness (skin
 loader + window compositor, no audio) so a future app has a solid foundation.
+
+---
+
+## Decision (2026-10-28): go the Winlator route
+
+Target device: Samsung Galaxy A55 5G (Exynos 1480, Xclipse 530, 8 GB).
+
+Requirement was "exactly like on Windows" — i.e. the real player, not a lookalike.
+That rules out option A as the primary path and makes **option C** the plan:
+
+- `docs/running-wacup-on-android-a55.md` — Winlator setup for the real WACUP
+  (Vortek/Gladio drivers, x64 build, touch input, known limits).
+- `android/wacup-wake/` — small Android app that opens a chosen app (Winlator) when
+  the screen turns on, so waking the phone goes straight to WACUP instead of the
+  home screen.
+
+Constraints found while building it, worth recording:
+
+- Android does not allow an app to unlock a secure device, and does not allow a
+  foreign app to draw over the keyguard. Zero-interaction "screen on → app" is only
+  possible with no secure lock or Smart Lock. Every other route (Routines, Tasker,
+  AutoInput) hits the same wall.
+- Starting an activity from `ACTION_SCREEN_ON` requires the
+  `SYSTEM_ALERT_WINDOW` ("display over other apps") exemption, plus a foreground
+  service because the broadcast is not manifest-deliverable.
+- `requestDismissKeyguard()` + a transparent activity is the standard trampoline;
+  it shows the PIN/fingerprint bouncer if one is set, then launches the target.
+
+Option A stays on the table as the fallback if Winlator's lack of a media session
+(no lockscreen/Bluetooth controls, container may pause in background) turns out to
+be a dealbreaker.

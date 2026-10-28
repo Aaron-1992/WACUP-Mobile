@@ -1,0 +1,19 @@
+// WACUP Wake — Android glue between the lock screen and a Windows app running in Winlator.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'WacupWake'
+include ':app'
