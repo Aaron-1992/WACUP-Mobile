@@ -288,6 +288,19 @@ def write_wav(path: str, pcm: bytes, options: RenderOptions) -> None:
         handle.writeframes(pcm)
 
 
+def wav_bytes(pcm: bytes, options: RenderOptions) -> bytes:
+    """Wrap raw PCM in a WAV container, in memory (used by the GUI)."""
+    import io
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(2 if options.stereo else 1)
+        handle.setsampwidth(2 if options.bits > 8 else 1)
+        handle.setframerate(options.rate)
+        handle.writeframes(pcm)
+    return buffer.getvalue()
+
+
 def write_stems(directory: str, stems: Dict[str, List[float]],
                 options: RenderOptions) -> List[str]:
     """One WAV per console channel, for checking the arrangement by ear."""

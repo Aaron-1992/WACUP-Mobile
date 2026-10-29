@@ -84,13 +84,17 @@ def _psg_note(note: Note, channel: int) -> List[bytes]:
     ]
 
 
-def _dmc_events(note: Note) -> List[Tuple[int, List[int]]]:
-    """Direct DAC loads: a decaying thump with no sample ROM needed."""
+def _dmc_events(note: Note) -> List[Tuple[int, int, int]]:
+    """Direct DAC loads: a decaying thump with no sample ROM needed.
+
+    Returns (samples_from_note_start, register, value).
+    """
     return [
-        (0, [0x10, 0x0F, 0x11, 0x60]),
-        (FRAME // 2, [0x11, 0x38]),
-        (FRAME, [0x11, 0x18]),
-        (FRAME * 2, [0x11, 0x00]),
+        (0, 0x10, 0x0F),          # disable IRQ/loop, fastest rate
+        (0, 0x11, 0x60),          # first DAC level
+        (FRAME // 2, 0x11, 0x38),
+        (FRAME, 0x11, 0x18),
+        (FRAME * 2, 0x11, 0x00),
     ]
 
 
@@ -120,12 +124,8 @@ def _collect(notes: List[Note], channels) -> Tuple[List[tuple], int, List[str]]:
             events.append((start, 0, _nes(_noise_events(note)), "nes"))
             events.append((end, 1, _nes([(0x0C, 0x10)]), "nes"))
         elif channel == "dmc":
-            for offset, payload in _dmc_events(note):
-                address, value = payload
-                events.append((min(end, start + offset), 0,
-                               _nes([(address, value)]), "nes"))
-            events.append((max(end, start + FRAME * 2 + 1), 1,
-                           _nes([(0x11, 0x00)]), "nes"))
+            for offset, address, value in _dmc_events(note):
+                events.append((start + offset, 0, _nes([(address, value)]), "nes"))
         elif channel.startswith("psg"):
             index = int(channel[-1]) - 1
             events.append((start, 0, _psg_note(note, index), "psg"))

@@ -151,6 +151,17 @@ def main_test() -> None:
     check("VGM contains NES APU writes", 0xB4 in blob[0x100:])
     check("no VGM warnings on the base console", not messages, str(messages))
 
+    print("VGM export with every extension enabled")
+    all_vgm = os.path.join(work, "all-chips.vgm")
+    try:
+        messages = write_vgm(all_vgm, all_notes, all_channels, duration,
+                             list(chips.EXTENSION_CHANNELS))
+        check("extended VGM written", os.path.getsize(all_vgm) > 1000)
+        check("extended VGM keeps silent about channels it cannot address",
+              any("WAV only" in m for m in messages) or not messages, str(messages))
+    except Exception as error:
+        check("extended VGM written", False, "%s: %s" % (type(error).__name__, error))
+
     print("VGM import round trip (a synthetic YM2612 log)")
     synth_vgm = make_test_midi.__file__ and _write_fake_genesis_vgm(
         os.path.join(work, "fake-genesis.vgm"))

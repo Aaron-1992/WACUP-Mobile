@@ -14,20 +14,37 @@ re-composes them for the NES sound chip, then renders the result as 8-bit WAV.
 
 No dependencies. Pure Python 3 standard library, so the Windows build is one `.exe`.
 
-## Quick start
+## Two ways to use it
+
+### The window (what you probably want)
+
+Double-click **`chip8bit.exe`** — no install, no Python. A window opens in your browser:
+
+1. **Add music** — drag files onto the drop zone (or click it). MIDI, VGM/VGZ,
+   GYM, and `.zip` of any of those.
+2. **Pick chips** — click the extension chips you want. The counter in the corner
+   shows how many voices you have (4 → 22). Your choices are remembered.
+3. **Convert** — press the big button. Each result plays right there, shows how
+   every note was placed (placed / on spare channels / shared / dropped), and has a
+   Download button. "Load the demo tune" gives you something to hear immediately.
+
+You can also **drop a file straight onto `chip8bit.exe`** — the window opens with
+that file already queued.
+
+Everything runs on your machine; nothing is uploaded. Files are written where you
+click Download, and the page can be closed any time. To stop the app, use *Quit
+chip8bit* at the bottom of the page.
+
+### The command line
 
 ```
-chip8bit song.mid
-chip8bit song.vgm --extensions vrc6,mmc5,fds
-chip8bit games\*.vgz --extensions all -o converted
-chip8bit --list-extensions
+chip8bit-cli.exe song.mid --extensions vrc6,mmc5,fds --stats
+chip8bit-cli.exe games\*.vgz --extensions all -o converted
+chip8bit-cli.exe --list-extensions
 ```
 
-`chip8bit song.mid` writes `song [nes].wav` next to the input.
+`chip8bit-cli.exe song.mid` writes `song [nes].wav` next to the input;
 `--extensions all` writes `song [nes+vrc6+mmc5+fds+n163+psg+dmc].wav`.
-
-On Windows you can also **drag a file onto `chip8bit.exe`** — the window stays
-open so you can read the result. Add `--extensions all` for the full console.
 
 ## The chips you can switch on
 
@@ -43,7 +60,7 @@ open so you can read the result. Add `--extensions all` for the full console.
 
 That is 4 voices bare and 22 with everything enabled.
 
-## Useful options
+## Command line options
 
 | option | what it does |
 | --- | --- |
@@ -81,12 +98,19 @@ That is 4 voices bare and 22 with everything enabled.
   PSF and friends are different formats — the tool says so rather than guessing.
 * Sources with more simultaneous voices than the console plus every extension
   (say, a dense orchestral MIDI) will still need arpeggios or lose a few inner
-  voices. `--stats` tells you exactly how many.
+  voices. `--stats` (and the window's result card) tells you exactly how many.
+* The window is served from `127.0.0.1` on your own machine and opened in your
+  default browser — that keeps the tool dependency-free and gives real drag-and-drop
+  and an audio player for free. It is not a native window, but it is the only
+  process running and it never talks to the network.
 
 ## Development
 
 ```
 python tests/make_test_midi.py tests/genesis-style.mid   # synthetic Genesis-style tune
-python tests/run_tests.py                                # end to end self test
+python tests/run_tests.py                                # pipeline self test (50+ checks)
+python chip8bit.py --selftest                            # GUI self test (starts the window)
+python chip8bit.py                                       # open the window
+python chip8bit.py --serve --port 8734                   # serve it without a browser
 python chip8bit.py tests/genesis-style.mid --extensions all --stats
 ```
