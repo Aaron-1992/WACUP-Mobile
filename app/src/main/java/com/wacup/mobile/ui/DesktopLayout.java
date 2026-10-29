@@ -213,7 +213,7 @@ public class DesktopLayout extends ViewGroup {
                 rows = (int) Math.floor(roomSkin / SkinLayout.PL_ROW_H);
                 rows = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(MAX_ROWS, rows));
             }
-            playlist.setVisibleRows(rows);
+            playlist.setVisibleRows(rows, false);
         }
 
         for (View child : windows) {

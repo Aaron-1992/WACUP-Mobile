@@ -43,8 +43,19 @@ public class PlaylistWindowView extends SkinSurface {
     }
 
     public void setVisibleRows(int rows) {
-        visibleRows = Math.max(SkinLayout.PL_MIN_ROWS, rows);
-        requestLayout();
+        setVisibleRows(rows, true);
+    }
+
+    /**
+     * @param relayout false when called from a parent's onMeasure: requesting a
+     *                 layout there makes the layout pass re-run forever, which
+     *                 shows up as a frozen black screen on launch.
+     */
+    public void setVisibleRows(int rows, boolean relayout) {
+        int clamped = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(120, rows));
+        if (clamped == visibleRows) return;
+        visibleRows = clamped;
+        if (relayout) requestLayout();
         invalidate();
     }
 

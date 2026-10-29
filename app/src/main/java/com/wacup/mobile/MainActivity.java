@@ -80,6 +80,12 @@ public class MainActivity extends Activity implements
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        String previousCrash = CrashLog.takeLastCrash(this);
+        if (previousCrash != null) {
+            showCrash(previousCrash);
+        }
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         goFullscreen();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -117,8 +123,42 @@ public class MainActivity extends Activity implements
         startPlaybackService();
     }
 
+    /** Last run's stack trace, so "it won't open" becomes something reportable. */
+    private void showCrash(final String report) {
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("Last run crashed")
+                    .setMessage(report)
+                    .setPositiveButton("Copy", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            android.content.ClipboardManager clipboard =
+                                    (android.content.ClipboardManager)
+                                            getSystemService(CLIPBOARD_SERVICE);
+                            if (clipboard != null) {
+                                clipboard.setPrimaryClip(
+                                        android.content.ClipData.newPlainText("crash", report));
+                                toast("Copied");
+                            }
+                        }
+                    })
+                    .setNegativeButton("Dismiss", null)
+                    .show();
+        } catch (Throwable ignored) {
+            // showing the report must never be the thing that crashes
+        }
+    }
+
     /** No status or navigation bars: the skin gets the whole panel. */
     private void goFullscreen() {
+        try {
+            goFullscreenUnsafe();
+        } catch (Throwable ignored) {
+            // window insets differ per OEM; never let cosmetics stop the app
+        }
+    }
+
+    private void goFullscreenUnsafe() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             getWindow().setDecorFitsSystemWindows(false);
             android.view.WindowInsetsController controller =
@@ -172,7 +212,7 @@ public class MainActivity extends Activity implements
     private void startPlaybackService() {
         try {
             startService(new Intent(this, PlaybackService.class));
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             // Playback works without the session; only the notification is lost.
         }
     }

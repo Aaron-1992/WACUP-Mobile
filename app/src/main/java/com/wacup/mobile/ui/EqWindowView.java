@@ -194,6 +194,8 @@ public class EqWindowView extends SkinSurface {
                 return true;
 
             case MotionEvent.ACTION_MOVE:
+                // One finger drives exactly one slider for the whole gesture: the one
+                // it landed on. That stops a sideways wobble from moving the neighbour.
                 if (draggedSlider >= 0) {
                     applyGain(draggedSlider, y);
                     return true;
@@ -211,18 +213,30 @@ public class EqWindowView extends SkinSurface {
         }
     }
 
+    /**
+     * The sliders sit on an 18px pitch but each thumb is 14px wide, so per-slider
+     * rectangles overlap and a "first match" lookup grabs the neighbour. Pick the
+     * column whose centre is closest to the finger instead.
+     */
     private int sliderAt(float x) {
-        if (x >= SkinLayout.EQ_PREAMP_X - 4
-                && x <= SkinLayout.EQ_PREAMP_X + SkinLayout.EQ_SLIDER_W + 4) {
-            return 0;
-        }
+        int nearest = -1;
+        float best = Float.MAX_VALUE;
+
+        float preampCentre = SkinLayout.EQ_PREAMP_X + SkinLayout.EQ_SLIDER_W / 2f;
+        best = Math.abs(x - preampCentre);
+        if (best <= SkinLayout.EQ_BAND_PITCH / 2f + 2f) nearest = 0;
+
         for (int i = 1; i <= 10; i++) {
-            int bandX = SkinLayout.EQ_BAND_X + (i - 1) * SkinLayout.EQ_BAND_PITCH;
-            if (x >= bandX - 4 && x <= bandX + SkinLayout.EQ_SLIDER_W + 4) {
-                return i;
+            float centre = SkinLayout.EQ_BAND_X + (i - 1) * SkinLayout.EQ_BAND_PITCH
+                    + SkinLayout.EQ_SLIDER_W / 2f;
+            float distance = Math.abs(x - centre);
+            if (distance < best) {
+                best = distance;
+                nearest = i;
             }
         }
-        return -1;
+        // Half a pitch of tolerance: anything further is a miss, not a neighbour.
+        return best <= SkinLayout.EQ_BAND_PITCH / 2f + 2f ? nearest : -1;
     }
 
     private void applyGain(int slider, float y) {
