@@ -1,4 +1,5 @@
-"""Two period-correct looks: Windows 95 and Amiga Workbench.
+"""The look of the app: FastTracker II by default, with Windows 95 and Amiga
+Workbench as alternatives.
 
 No images, no fonts to ship — just the palettes and the bevel drawing that made
 those interfaces recognisable: a 2-pixel raised edge, a 1-pixel sunken field, a
@@ -38,6 +39,14 @@ class Theme:
     border: int = 2
     rounded: int = 0
     mono: bool = False
+    smooth: bool = False      # antialias text (tracker look) or keep it chunky?
+    # pattern grid colours: every fourth row, the playing row, empty cells
+    stripe: Color = (0, 0, 96)
+    playing: Color = (0, 0, 60)
+    playing_text: Color = (232, 232, 96)
+    empty_text: Color = (0, 0, 144)
+    pattern_header_text: Color = (96, 168, 216)   # channel labels
+    pattern_value: Color = (232, 232, 96)         # the volume column
 
     def fonts(self):
         """Font family list, most authentic first, with a guaranteed fallback."""
@@ -45,6 +54,35 @@ class Theme:
             return ["Topaz", "DejaVu Sans Mono", "Liberation Mono", "Courier New"]
         return ["MS Sans Serif", "Tahoma", "Verdana", "DejaVu Sans", "Liberation Sans"]
 
+
+# FastTracker II: navy panels, cyan labels, yellow hex values, sunken pattern rows.
+# These are the colours anyone who used a tracker in 1995 will recognise.
+TRACKER = Theme(
+    key="tracker",
+    name="FastTracker II",
+    desktop=(0, 0, 132),
+    face=(0, 0, 168),
+    face_alt=(0, 0, 148),
+    light=(168, 168, 216),
+    shadow=(0, 0, 96),
+    dark=(0, 0, 32),
+    text=(216, 216, 216),
+    dim=(96, 168, 216),
+    field=(0, 0, 112),
+    field_text=(232, 232, 96),
+    title_active=(0, 0, 200),
+    title_text=(255, 255, 255),
+    accent=(232, 232, 96),
+    accent_dark=(0, 0, 104),
+    warn=(255, 176, 96),
+    bad=(255, 96, 96),
+    ok=(176, 232, 144),
+    title_height=18,
+    border=1,
+    rounded=0,
+    mono=True,
+    smooth=True,
+)
 
 WIN95 = Theme(
     key="win95",
@@ -69,6 +107,12 @@ WIN95 = Theme(
     title_height=22,
     border=2,
     rounded=0,
+    stripe=(236, 236, 236),
+    playing=(0, 0, 128),
+    playing_text=(255, 255, 255),
+    empty_text=(150, 150, 150),
+    pattern_header_text=(0, 0, 0),
+    pattern_value=(0, 0, 128),
 )
 
 AMIGA = Theme(
@@ -95,17 +139,23 @@ AMIGA = Theme(
     border=3,
     rounded=0,
     mono=True,
+    stripe=(240, 150, 0),
+    playing=(0, 0, 0),
+    playing_text=(255, 170, 0),
+    empty_text=(150, 90, 0),
+    pattern_header_text=(0, 0, 0),
+    pattern_value=(0, 0, 0),
 )
 
-THEMES = {"win95": WIN95, "amiga": AMIGA}
+THEMES = {"tracker": TRACKER, "win95": WIN95, "amiga": AMIGA}
 
 
 def get(key: str) -> Theme:
-    return THEMES.get(key, WIN95)
+    return THEMES.get(key, TRACKER)
 
 
 def next_theme(key: str) -> Theme:
-    order = ["win95", "amiga"]
+    order = ["tracker", "win95", "amiga"]
     index = order.index(key) if key in order else 0
     return THEMES[order[(index + 1) % len(order)]]
 
@@ -204,24 +254,46 @@ def scrollbar(surface, rect: pygame.Rect, theme: Theme, fraction: float,
               visible: float) -> None:
     """A chunky scrollbar, because a smooth one would look out of period."""
     field(surface, rect, theme, theme.face_alt)
-    arrow = pygame.Rect(rect.x + 1, rect.y + 1, rect.width - 2, rect.width - 2)
-    for direction in (arrow, pygame.Rect(rect.x + 1, rect.bottom - rect.width + 1,
-                                         rect.width - 2, rect.width - 2)):
+    fraction = max(0.0, min(1.0, fraction))
+    visible = max(0.0, min(1.0, visible))
+
+    if rect.width > rect.height:
+        # a horizontal bar: arrows only if they still fit in the height
+        size = min(rect.height - 2, 12) if rect.height >= 8 else 0
+        track = pygame.Rect(rect.x + 1 + size, rect.y + 1,
+                            rect.width - 2 - 2 * size, rect.height - 2)
+        if size:
+            for arrow in (pygame.Rect(rect.x + 1, rect.y + 1, size, size),
+                          pygame.Rect(rect.right - size - 1, rect.y + 1, size, size)):
+                button(surface, arrow, theme, "", pygame.font.Font(None, 10))
+        if visible >= 1.0 or track.width <= 0:
+            return
+        thumb_width = max(14, int(track.width * visible))
+        thumb = pygame.Rect(track.x + int((track.width - thumb_width) * fraction),
+                            track.y, thumb_width, track.height)
+        button(surface, thumb, theme, "", pygame.font.Font(None, 10))
+        return
+
+    size = min(rect.width - 2, max(8, rect.height // 4))
+    top = pygame.Rect(rect.x + 1, rect.y + 1, rect.width - 2, size)
+    bottom = pygame.Rect(rect.x + 1, rect.bottom - size - 1, rect.width - 2, size)
+    for direction, up in ((top, True), (bottom, False)):
         button(surface, direction, theme, "", pygame.font.Font(None, 10))
-        points = ([(direction.centerx, direction.y + 4),
-                   (direction.x + 4, direction.bottom - 4),
-                   (direction.right - 4, direction.bottom - 4)]
-                  if direction.y == arrow.y else
-                  [(direction.centerx, direction.bottom - 4),
-                   (direction.x + 4, direction.y + 4),
-                   (direction.right - 4, direction.y + 4)])
+        if up:
+            points = [(direction.centerx, direction.y + 4),
+                      (direction.x + 4, direction.bottom - 4),
+                      (direction.right - 4, direction.bottom - 4)]
+        else:
+            points = [(direction.centerx, direction.bottom - 4),
+                      (direction.x + 4, direction.y + 4),
+                      (direction.right - 4, direction.y + 4)]
         pygame.draw.polygon(surface, theme.text, points)
-    track = pygame.Rect(rect.x + 1, arrow.bottom + 1, rect.width - 2,
-                        rect.height - 2 * (arrow.height + 1))
+    track = pygame.Rect(rect.x + 1, top.bottom + 1, rect.width - 2,
+                        rect.height - 2 * (size + 1))
     if visible >= 1.0 or track.height <= 0:
         return
     thumb_height = max(14, int(track.height * visible))
     travel = track.height - thumb_height
-    thumb_y = track.y + int(travel * max(0.0, min(1.0, fraction)))
+    thumb_y = track.y + int(travel * fraction)
     thumb = pygame.Rect(track.x, thumb_y, track.width, thumb_height)
     button(surface, thumb, theme, "", pygame.font.Font(None, 10))

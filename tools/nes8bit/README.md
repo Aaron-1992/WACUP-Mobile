@@ -3,8 +3,10 @@
 Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, or a `.zip` of them) and
 re-composes them for the NES sound chip, then renders 8-bit audio.
 
-* **its own window, in 1995** — Windows 95 or Amiga Workbench looks, switchable from
-  the title bar; no browser, no server, no install;
+* **its own window, in 1995** — the window is a tracker: a FastTracker II style
+  pattern grid with one column per NES voice, hex notes, striped rows and a play
+  position that scrolls the pattern. Windows 95 and Amiga Workbench looks are one
+  click away; no browser, no server, no install;
 * **it reads the MIDI before it converts it** — tracks are split into monophonic
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
@@ -13,8 +15,9 @@ re-composes them for the NES sound chip, then renders 8-bit audio.
 * **no click-and-fizz** — every note has an attack and a release, and the mix is
   gently filtered, so it sounds like music rather than a test tone;
 * **every hardware voice is used, and extension chips can be switched on** (4 → 22);
-* **channel sharing is rationed**, see below — the tool would rather leave a note
-  out than turn your song into a wasp in a jar.
+* **channels are not crammed** — when every voice is busy the note is left out and
+  counted, rather than squeezed in as an arpeggio. The melody, bass and drums always
+  get a voice first, so the important line is never the one that gets dropped.
 
 ## The window
 
@@ -24,15 +27,35 @@ window, no browser anywhere):
 1. **Add music** — drag files onto the window, or press *Add files…* (the real
    Windows file dialog). MIDI, VGM/VGZ, GYM, and `.zip` of any of those.
    *Demo tune* loads something to play with immediately.
-2. **Pick chips** — click the extension chips. The header shows your voice count
-   (4 → 22). Your choices are remembered between runs.
-3. **Convert** — press *Convert*. Each result gets a card that first tells you what
-   the converter understood: `120 BPM · 4/4 · 169 notes · D major`, the instruments
-   (`Lead 2 (sawtooth), Synth Bass 1, Pad 2 (warm), Drums`), and how many voices it
-   placed, shared or thinned. Then play it, *Save as…* anywhere, or *Open folder*.
+2. **Pick chips** — tick the extension chips in the `CHIPS` box (each row shows how
+   many voices it adds). `VOICES` in the header goes 4 → 22. Your choices are
+   remembered between runs.
+3. **Convert** — press *Convert*. The header boxes then tell you what the converter
+   understood: `120 BPM · 4/4 · 8.0 s · 169 notes`, `Instr: Lead 2 (sawtooth), Lead 1
+   (square)…`, `Found 1 melody, 2 counter, 1 bass, 6 harmony, 1 drum (11 voices)`,
+   and `164 notes kept · 8 left out (no free channel)`.
 
-Click the badge in the title bar to switch between the **Windows 95** and **Amiga
-Workbench** looks. The choice is remembered.
+### The pattern grid
+
+The big panel is a tracker pattern, built from what actually went to the chips — not
+a mock-up:
+
+```
+00  C-4 50 33  G-3 59 26  F#2 00 33  E-4 50 2B  C-5 51 2F
+01  --- .. ..  --- .. ..
+```
+
+* one column per voice: `PU1 PU2 TRI NOI` and, with chips on, `V6-1 V6-2 V6S M5-1
+  M5-2 FDS N1…N8 PSG1..3 DMC`;
+* `note · instrument · volume` in hex, exactly the tracker layout (`C-4 50 33`);
+* every fourth row is striped, the playing row is highlighted and the pattern
+  scrolls to follow the music;
+* **click any row to start playing from there**; arrow keys / Page Up/Down /
+  mouse wheel scroll rows, Shift+wheel or ←/→ scroll the channel columns; a longer
+  conversion than the panel fits gets a scrollbar.
+
+The look button in the header cycles **FT2 (FastTracker II, the default) → Windows
+95 → Amiga Workbench**. The choice is remembered.
 
 Files dropped **straight onto `chip8bit.exe`** open the window with them queued.
 Everything happens on your machine; nothing is uploaded and no port is opened.
@@ -48,7 +71,8 @@ chip8bit-cli.exe --cli --list-extensions
 ```
 
 `--bits 8` gives you the crunch; the default is 16-bit. `--no-drums` falls back to
-the noise channel, `--no-sharing` forbids arpeggios entirely.
+the noise channel. `--no-sharing` is the default already: when no voice fits, the
+note is dropped and counted, never arpeggio-crammed into another channel.
 
 ## The chips you can switch on
 
@@ -93,18 +117,28 @@ A chip channel plays **one note at a time**. Anything else is a lie that sounds
 like one, so:
 
 1. each part is classified (melody / harmony / bass / drums);
-2. melody leans on the pulses, bass takes the triangle, drums take the delta
+2. channels are handed out in **three passes**: melody, bass and drums first — the
+   lines you would actually notice — then counter-melodies and rhythm, then harmony.
+   A busy file therefore never pushes the tune out of the way;
+3. melody leans on the pulses, bass takes the triangle, drums take the delta
    channel (and the noise channel when it is enabled), harmony fills what is free;
-3. a note that finds nothing free is first put on **any other free voice** that
+4. a note that finds nothing free is first put on **any other free voice** that
    can plausibly play it;
-4. percussion may **take a channel from a hi-hat** — a missing backbeat is worse
+5. percussion may **take a channel from a hi-hat** — a missing backbeat is worse
    than a clipped hat, and that is what real NES drum code does;
-5. only then, and only within a budget, may two or three notes **share** a channel
-   as a fast arpeggio — and only if they overlap for long enough for a full cycle,
-   so it reads as a chord;
 6. parts that duplicate each other note for note are folded into one;
-7. anything left over is reported, not smuggled in. Inner harmony voices get
-   thinned first, because that is what a composer would do.
+7. anything left over is **dropped and counted**, not smuggled in — there is no
+   arpeggio cramming. The header and the result card say exactly how many notes
+   were left out, and where they came from.
+
+Measured on the built-in demo tune (169 notes):
+
+| chips | kept | left out | dropped |
+| --- | --- | --- | --- |
+| bare NES (4 voices) | 121 | 34 (24 drum, 10 harmony) | 17 |
+| + VRC6 (7) | 140 | 27 | 5 |
+| + VRC6, MMC5, FDS (10) | 148 | 24 (all drum) | 0 |
+| all chips (22) | 164 | 8 (all drum) | 0 |
 
 `--stats` (and the result card) tells you the exact count of each outcome.
 

@@ -101,7 +101,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
 
     analysis = analyze.analyse(song)
     options = Options(
-        allow_sharing=not args.no_sharing,
+        allow_sharing=bool(args.sharing),
         dedupe=not args.no_dedupe,
         arp_frames=args.arp_frames,
         quantize=not args.no_quantize,
@@ -181,7 +181,10 @@ def main(argv=None) -> int:
     parser.add_argument("--gain", type=float, default=0.9, help="headroom, 0.1-1.0")
     parser.add_argument("--linear", action="store_true", help="skip the NES mixer curve")
     parser.add_argument("--no-sharing", action="store_true",
-                        help="never split a held note into an arpeggio")
+                        help="default: notes that find no free voice are left out")
+    parser.add_argument("--sharing", action="store_true",
+                        help="allow arpeggio channel sharing (off by default: it "
+                             "sounds like a wasp in a jar)")
     parser.add_argument("--no-drums", action="store_true",
                         help="use the noise channel instead of sampled drum hits")
     parser.add_argument("--no-dedupe", action="store_true",

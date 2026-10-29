@@ -22,7 +22,7 @@ class Settings:
     bits: int = 16
     rate: int = 44100
     arp_frames: int = 2
-    sharing: bool = True
+    sharing: bool = False          # arpeggio cramming is off: it sounds like mud
     dedupe: bool = True
     sampled_drums: bool = True
     stereo: bool = False
@@ -68,6 +68,11 @@ class Result:
     stats: Optional[Stats] = None
     analysis: Optional[object] = None
     analysis_lines: List[str] = field(default_factory=list)
+    notes: List = field(default_factory=list)      # arranged notes, for the pattern view
+    tempo: float = 120.0
+    kept: int = 0
+    left_out: int = 0              # no free channel: report, never cram in
+    dropped: int = 0               # too short / too quiet to keep
     warnings: List[str] = field(default_factory=list)
     source_format: str = ""
     source_notes: int = 0
@@ -169,6 +174,11 @@ def convert_file(source: str, settings: Settings,
         except Exception as error:
             result.warnings.append("VGM export failed: %s" % error)
 
+    result.notes = notes
+    result.tempo = float(getattr(analysis, "tempo", 0.0) or 120.0)
+    result.kept = len(notes)
+    result.left_out = stats.simplified
+    result.dropped = stats.dropped
     result.seconds = duration
     result.voices = len(stats.per_channel_notes)
     result.channels = dict(sorted(stats.per_channel_notes.items()))

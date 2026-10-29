@@ -56,7 +56,7 @@ KIND_GAIN = {
 class Options:
     fps: float = 60.0988          # NTSC NES frame rate
     arp_frames: int = 2           # frames each pitch of a shared channel gets
-    allow_sharing: bool = True
+    allow_sharing: bool = False
     transpose: int = 0
     max_notes_per_channel: int = 0    # 0 = unlimited
     quantize: bool = True
@@ -79,6 +79,7 @@ class Stats:
     shared: int = 0               # had to share a channel as an arpeggio
     dropped: int = 0              # too short / too quiet / unplaceable
     simplified: int = 0           # left out on purpose so the mix stays clean
+    left_out: Dict[str, int] = field(default_factory=dict)
     deduped: int = 0              # doubled another part note for note
     channels_used: Dict[str, int] = field(default_factory=dict)
     per_channel_notes: Dict[str, int] = field(default_factory=dict)
@@ -88,8 +89,13 @@ class Stats:
         lines = [
             "  notes placed directly on a suited channel : %d" % self.direct,
             "  notes re-homed onto a free spare channel   : %d" % self.overflow,
-            "  notes merged into arpeggio clusters        : %d" % self.shared,
-            "  notes deliberately thinned for clarity     : %d" % self.simplified,
+            "  notes left out (no free channel)           : %d" % self.simplified,
+            "    of which harmony                         : %d"
+            % self.left_out.get("harmony", 0),
+            "    of which percussion                      : %d"
+            % self.left_out.get("drum", 0),
+            "    of which counter-melody                  : %d"
+            % self.left_out.get("counter", 0),
             "  doubled notes folded into one              : %d" % self.deduped,
             "  notes dropped (too short/quiet)            : %d" % self.dropped,
             "  channel-sharing clusters                   : %d" % self.clusters,
@@ -200,8 +206,21 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
         source_notes = _dedupe(source_notes, stats)
     share_budget = int(len(source_notes) * max(0.0, options.share_budget))
 
-    for note in sorted(source_notes, key=lambda n: (n.start, -_priority(n.role),
-                                                   -n.velocity, -n.pitch)):
+    # Three passes, most important music first. A harmony note can only take what
+    # is still free after the melody, the bass and the drums have been placed, so
+    # the song never loses its tune to a chord.
+    ordered: List[Note] = []
+    for roles, key in (
+            (("drum", "melody", "bass"), lambda n: (n.start, -n.velocity, n.pitch)),
+            (("counter", "rhythm"), lambda n: (n.start, -n.velocity, n.pitch)),
+            (("harmony", "melodic", "melody"), lambda n: (n.start, n.pitch, -n.velocity))):
+        group = [n for n in source_notes if n.role in roles]
+        ordered.extend(sorted(group, key=key))
+    seen = set(id(n) for n in ordered)
+    ordered.extend(sorted([n for n in source_notes if id(n) not in seen],
+                          key=lambda n: (n.start, n.pitch)))
+
+    for note in ordered:
         if note.dur < options.min_duration or note.velocity < options.quietest:
             stats.dropped += 1
             continue
@@ -267,8 +286,9 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
             # Leaving a note out is usually better than mangling the part. A
             # percussion hit that lost its channel to a kick or a snare counts as
             # deliberate thinning, not as a failure.
-            if note.role in ("harmony", "drum") or note.role == "counter":
+            if note.role in ("harmony", "drum", "counter", "rhythm"):
                 stats.simplified += 1
+                stats.left_out[note.role] = stats.left_out.get(note.role, 0) + 1
             else:
                 stats.dropped += 1
             continue

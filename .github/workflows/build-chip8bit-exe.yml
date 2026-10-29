@@ -33,6 +33,9 @@ jobs:
         run: |
           python tests/make_test_midi.py tests/genesis-style.mid
           python chip8bit.py --selftest --screenshot window.png
+          ls -la window-*.png
+          # all three looks must have rendered, not just the default one
+          test -f window-tracker.png && test -f window-win95.png && test -f window-amiga.png
 
       - name: Demo renders (all chips, and bare NES)
         working-directory: tools/nes8bit
@@ -52,7 +55,7 @@ jobs:
         run: |
           mkdir -p release_assets
           cp demo/demo-all-chips.wav demo/demo-bare-nes.wav release_assets/
-          cp window-win95.png window-amiga.png release_assets/
+          cp window-tracker.png window-win95.png window-amiga.png release_assets/
           ls -la release_assets
 
       - uses: actions/upload-artifact@v4
@@ -108,7 +111,9 @@ jobs:
           "window selftest exit: $($gui.ExitCode)"
           Get-ChildItem .\window-*.png | Format-Table Name, Length
           if ($gui.ExitCode -ne 0) { throw "chip8bit.exe --selftest exited $($gui.ExitCode)" }
-          if (-not (Test-Path .\window-win95.png)) { throw "the window never drew a frame" }
+          if (-not (Test-Path .\window-tracker.png)) { throw "the window never drew a frame" }
+          if (-not (Test-Path .\window-win95.png)) { throw "the Windows 95 look vanished" }
+          if (-not (Test-Path .\window-amiga.png)) { throw "the Amiga look vanished" }
 
           # the console build still does the classic command line job
           $out = & ".\dist\chip8bit-cli.exe" --cli tests\genesis-style.mid --extensions all --stats 2>&1 | Out-String
@@ -199,13 +204,15 @@ jobs:
             ```
 
             Sound: drums are real samples through the delta channel, every note has
-            an attack/release so nothing clicks, and a channel only gets a second
-            voice when that genuinely sounds like a chord.
+            an attack/release so nothing clicks, and when every voice is busy the
+            note is left out and counted — melody, bass and drums get the channels
+            first, and nothing is crammed in as an arpeggio.
 
             `demo-*.wav` are the built-in test tune on the bare NES and on the console
-            with every extension chip enabled. `window-win95.png` and
-            `window-amiga.png` are real screenshots of the two looks — click the
-            title bar badge to switch between them.
+            with every extension chip enabled. `window-tracker.png`,
+            `window-win95.png` and `window-amiga.png` are real screenshots of the
+            three looks — the FastTracker II pattern grid is the default, and the
+            look button in the header cycles between them.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe
@@ -221,8 +228,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -e
-          for name in chip8bit.exe chip8bit-cli.exe window-win95.png \
-                      window-amiga.png demo-all-chips.wav demo-bare-nes.wav; do
+          for name in chip8bit.exe chip8bit-cli.exe window-tracker.png \
+                      window-win95.png window-amiga.png \
+                      demo-all-chips.wav demo-bare-nes.wav; do
             size=$(gh release view chip8bit-latest --json assets \
               --jq ".assets[] | select(.name==\"$name\") | .size")
             if [ -z "$size" ]; then
