@@ -1,0 +1,12 @@
+# build products
+build/
+dist/
+*.spec
+
+# generated test material and renders
+tests/*.mid
+tests/*.wav
+demo/
+
+__pycache__/
+*.pyc
