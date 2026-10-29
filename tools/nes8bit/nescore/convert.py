@@ -31,7 +31,7 @@ class Settings:
     equalise: bool = True          # balance the voices against each other
     echo: bool = True              # the NES "second pulse" delay
     limit: bool = True             # peak limiting instead of turning everything down
-    compress: bool = False         # extra master compression, off by default
+    compress: bool = True          # gentle master compression
 
     def channels(self):
         return chips.build_channel_set(

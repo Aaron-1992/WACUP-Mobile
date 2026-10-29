@@ -116,9 +116,9 @@ def echo(buffer: List[float], rate: int, delay: float = ECHO_DELAY,
     return buffer
 
 
-def compress(buffer: List[float], rate: int, threshold_db: float = -20.0,
-             ratio: float = 2.2, attack: float = 0.008,
-             release: float = 0.20) -> List[float]:
+def compress(buffer: List[float], rate: int, threshold_db: float = -24.0,
+             ratio: float = 1.8, attack: float = 0.010,
+             release: float = 0.25) -> List[float]:
     """Block-based soft-knee compressor: keeps the quiet parts alive, tames peaks."""
     block = max(32, int(rate * 0.004))
     threshold = 10.0 ** (threshold_db / 20.0)
@@ -140,6 +140,31 @@ def compress(buffer: List[float], rate: int, threshold_db: float = -20.0,
         if abs(gain - 1.0) > 1e-4:
             buffer[start:end] = [v * gain for v in chunk]
     return buffer
+
+
+def choose_ceiling(buffer: List[float], rate: int, base: float = 0.72,
+                   cap: float = 0.86) -> float:
+    """How hard to limit: a sparse mix can take it, a wall of squares cannot.
+
+    On a four-voice tune only a few percent of the samples poke above the base
+    ceiling, so limiting there is free loudness. On twenty-two voices most of the
+    mix is up there and clipping it would just add distortion — so the ceiling
+    backs off automatically.
+    """
+    block = max(16, int(rate * 0.0015))
+    total = 0
+    loud = 0
+    for start in range(0, len(buffer), block):
+        chunk = buffer[start:start + block]
+        if not chunk:
+            break
+        total += 1
+        if max((abs(v) for v in chunk), default=0.0) > base:
+            loud += 1
+    fraction = loud / max(1, total)
+    if fraction <= 0.06:
+        return base
+    return min(cap, base + (fraction - 0.06) * 1.3)
 
 
 def limit(buffer: List[float], rate: int, ceiling: float = 0.96,

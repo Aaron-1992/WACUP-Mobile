@@ -120,7 +120,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
         equalise=not args.no_balance,
         echo=not args.no_echo,
         limit=not args.no_limit,
-        compress=bool(args.compress),
+        compress=not args.no_compress,
     )
 
     grouped = {}
@@ -190,8 +190,8 @@ def main(argv=None) -> int:
                         help="no NES-style echo on the mix")
     parser.add_argument("--no-limit", action="store_true",
                         help="no peak limiting on the master")
-    parser.add_argument("--compress", action="store_true",
-                        help="extra bus compression on the master")
+    parser.add_argument("--no-compress", action="store_true",
+                        help="no bus compression on the master")
     parser.add_argument("--no-sharing", action="store_true",
                         help="default: notes that find no free voice are left out")
     parser.add_argument("--sharing", action="store_true",

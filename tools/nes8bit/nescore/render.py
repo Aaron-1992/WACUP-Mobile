@@ -73,7 +73,7 @@ class RenderOptions:
     equalise: bool = True       # put every voice at its role's level
     echo: bool = True           # the "second pulse" trick NES composers used
     limit: bool = True          # tame the transients instead of the whole mix
-    compress: bool = False      # extra bus compression, off unless asked for
+    compress: bool = True       # gentle bus compression: even, not squashed
 
 
 def note_frequency(pitch: float) -> float:
@@ -433,7 +433,8 @@ def render(notes: List[Note], channels, options: RenderOptions,
     if peak > 0:
         master = [value * (options.gain / peak) for value in master]
     if options.limit:
-        mix.limit(master, options.rate, ceiling=0.72)
+        mix.limit(master, options.rate,
+                  ceiling=mix.choose_ceiling(master, options.rate))
         peak = max((abs(value) for value in master), default=0.0)
         if peak > 0:
             master = [value * (options.gain / peak) for value in master]
