@@ -39,9 +39,17 @@ public abstract class SkinSurface extends View {
     }
 
     public void setScale(float newScale) {
+        setScale(newScale, true);
+    }
+
+    /**
+     * @param relayout false when called from a parent's onMeasure — requesting a
+     *                 layout during a measure pass makes the pass re-run endlessly.
+     */
+    public void setScale(float newScale, boolean relayout) {
         if (Math.abs(newScale - this.scale) < 0.001f) return;
         this.scale = newScale;
-        requestLayout();
+        if (relayout) requestLayout();
         invalidate();
     }
 

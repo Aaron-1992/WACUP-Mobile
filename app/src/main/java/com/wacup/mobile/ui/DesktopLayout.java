@@ -217,7 +217,7 @@ public class DesktopLayout extends ViewGroup {
         }
 
         for (View child : windows) {
-            if (child instanceof SkinSurface) ((SkinSurface) child).setScale(scale);
+            if (child instanceof SkinSurface) ((SkinSurface) child).setScale(scale, false);
             child.measure(spec, spec);
         }
 
