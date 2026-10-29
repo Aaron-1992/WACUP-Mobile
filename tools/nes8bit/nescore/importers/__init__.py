@@ -5,7 +5,6 @@ Dropping a new module here and registering it is all it takes to support another
 game-music format — that is the "extension" side of the tool.
 """
 
-import importlib
 import os
 import tempfile
 import zipfile
@@ -26,13 +25,33 @@ def register(name: str, label: str):
 
 
 def _load_builtin() -> None:
-    for module_name in ("midi", "vgm", "gym"):
-        if module_name in _REGISTRY:
-            continue
+    # These are imported by name, not by string, so that a frozen executable
+    # (PyInstaller) can see them at build time as well as at run time.
+    if _REGISTRY:
+        return
+    for module_name, loader in (
+            ("midi", _import_midi),
+            ("vgm", _import_vgm),
+            ("gym", _import_gym)):
         try:
-            importlib.import_module("nescore.importers.%s" % module_name)
-        except Exception as exc:      # a broken plugin must not kill the tool
+            loader()
+        except Exception as exc:      # a broken importer must not kill the tool
             _LABELS[module_name] = "unavailable (%s)" % exc
+
+
+def _import_midi():
+    from . import midi          # noqa: F401  (registers itself on import)
+    return midi
+
+
+def _import_vgm():
+    from . import vgm           # noqa: F401
+    return vgm
+
+
+def _import_gym():
+    from . import gym           # noqa: F401
+    return gym
 
 
 def available() -> List[Tuple[str, str]]:
