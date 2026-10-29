@@ -153,6 +153,14 @@ jobs:
           path: dist
       - name: Show release assets
         run: ls -la dist
+
+      # The release action leaves same-named assets in place, which means a new
+      # build silently sits behind yesterday's binaries. Drop the release first.
+      - name: Remove the old release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete chip8bit-latest --cleanup-tag --yes || true
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: chip8bit-latest
