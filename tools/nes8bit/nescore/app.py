@@ -106,10 +106,19 @@ def _fit(font, text: str, width: int) -> str:
 
 
 class QueueItem:
+    """One file waiting to be converted, plus what happened to it."""
+
     def __init__(self, path: str, name: str, size: int = 0):
         self.path = path
         self.name = name
         self.size = size
+        self.status = "waiting"      # waiting | working | failed  (done leaves)
+        self.fraction = 0.0
+        self.stage = ""
+        self.error = ""
+
+
+READABLE = (".mid", ".midi", ".rmi", ".kar", ".vgm", ".vgz", ".gym", ".zip")
 
 
 class App:
@@ -129,6 +138,9 @@ class App:
 
         self.items: List[QueueItem] = []
         self.results: List[convert.Result] = []
+        self.batch: List[QueueItem] = []
+        self.output_dir = dialogs.default_output_dir()
+        self.convert_started = 0.0
         self.messages: queue.Queue = queue.Queue()
         self.busy = False
         self.progress = 0.0
@@ -226,8 +238,17 @@ class App:
 
     def add_path(self, path: str) -> None:
         if not os.path.isfile(path):
+            self.status = "Not a file: %s" % path
+            self.status_error = True
             return
         if any(item.path == path for item in self.items):
+            self.status = "%s is already in the list" % os.path.basename(path)
+            self.status_error = False
+            return
+        if os.path.splitext(path)[1].lower() not in READABLE:
+            self.status = ("Can't read %s — MIDI, VGM, GYM or a .zip of those"
+                           % os.path.basename(path))
+            self.status_error = True
             return
         try:
             size = os.path.getsize(path)
@@ -252,8 +273,14 @@ class App:
             self.items.pop(index)
 
     def clear_queue(self) -> None:
+        if self.busy:
+            self.status = "Still converting — wait, or press STOP"
+            self.status_error = True
+            return
         self.items = []
         self.scroll_queue = 0
+        self.status = "List cleared — results are still in CONVERTED"
+        self.status_error = False
 
     def pick_files(self) -> None:
         paths = dialogs.open_files()
@@ -267,30 +294,69 @@ class App:
     # ----------------------------------------------------------------- convert
 
     def start_convert(self) -> None:
-        if self.busy or not self.items:
+        if self.busy:
             return
-        files = [(item.path, item.name) for item in self.items]
-        settings = self.settings
+        pending = [item for item in self.items if item.status != "done"]
+        if not pending:
+            self.status = "Nothing to convert — press ADD MUSIC or drop a file here"
+            self.status_error = False
+            return
+        for item in pending:
+            item.status = "waiting"
+            item.fraction = 0.0
+            item.stage = ""
+            item.error = ""
+        self.batch = pending
         self.busy = True
         self.progress = 0.0
         self.progress_label = "Starting…"
+        self.convert_started = time.time()
         self.status_error = False
-        threading.Thread(target=self._work, args=(files, settings),
+        self.status = "Converting %d file%s…" % (len(pending),
+                                                 "" if len(pending) == 1 else "s")
+        files = [(item.path, item.name) for item in pending]
+        threading.Thread(target=self._work, args=(files, self.settings),
                          daemon=True).start()
 
-    def _work(self, files, settings) -> None:
-        output_dir = dialogs.default_output_dir()
-        for index, (path, name) in enumerate(files):
-            def progress(stage, fraction, index=index, name=name):
-                self.messages.put(("progress", stage,
-                                   (index + max(0.0, min(1.0, fraction))) / len(files),
-                                   name))
+    def output_line(self) -> str:
+        return os.path.join(self.output_dir, "")
 
-            target = os.path.join(output_dir, convert.output_name(path, settings))
-            result = convert.convert_file(path, settings, output_path=target,
-                                          progress=progress)
-            self.messages.put(("result", result, path))
-        self.messages.put(("done",))
+    def open_output_dir(self) -> None:
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except OSError:
+            pass
+        dialogs.reveal(self.output_line())
+        self.status = "Converted files go to %s" % self.output_dir
+        self.status_error = False
+
+    def _work(self, files, settings) -> None:
+        output_dir = self.output_dir
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            for index, (path, name) in enumerate(files):
+                self.messages.put(("begin", index))
+
+                def progress(stage, fraction, index=index):
+                    self.messages.put(("progress", index, stage,
+                                       max(0.0, min(1.0, fraction))))
+
+                try:
+                    target = os.path.join(output_dir,
+                                          convert.output_name(path, settings))
+                    result = convert.convert_file(path, settings,
+                                                  output_path=target,
+                                                  progress=progress)
+                except Exception as error:      # one bad file must not stop the rest
+                    result = convert.Result(ok=False, name=name,
+                                            error="%s: %s" % (type(error).__name__,
+                                                              error))
+                self.messages.put(("result", index, result, path))
+        finally:
+            self.messages.put(("done",))
 
     def _drain(self) -> None:
         while True:
@@ -298,14 +364,41 @@ class App:
                 message = self.messages.get_nowait()
             except queue.Empty:
                 return
-            if message[0] == "progress":
-                _, stage, fraction, name = message
-                self.progress = fraction
-                self.progress_label = "%s — %s" % (name, stage)
+            if message[0] == "begin":
+                _, index = message
+                if 0 <= index < len(self.batch):
+                    item = self.batch[index]
+                    item.status = "working"
+                    item.fraction = 0.0
+                    self.progress_label = item.name
+            elif message[0] == "progress":
+                _, index, stage, fraction = message
+                total = max(1, len(self.batch))
+                if 0 <= index < len(self.batch):
+                    item = self.batch[index]
+                    item.fraction = fraction
+                    item.stage = stage
+                    self.progress_label = "%s — %s" % (item.name, stage)
+                self.progress = (index + fraction) / total
             elif message[0] == "result":
-                _, result, path = message
+                _, index, result, path = message
+                if 0 <= index < len(self.batch):
+                    item = self.batch[index]
+                    item.fraction = 1.0
+                    if result.ok:
+                        item.status = "done"
+                    else:
+                        item.status = "failed"
+                        item.error = result.error
                 self.results.insert(0, result)
-                self.items = [item for item in self.items if item.path != path]
+                self.selected_result = 0
+                if not result.ok:
+                    for position, other in enumerate(self.results):
+                        if other.ok:
+                            self.selected_result = position
+                            break
+                self.pattern_row = 0
+                self.pattern_column = 0
                 if result.ok:
                     self.status = "Saved %s" % os.path.basename(result.wav_path)
                     self.status_error = False
@@ -315,6 +408,38 @@ class App:
             elif message[0] == "done":
                 self.busy = False
                 self.progress = 0.0
+                self.progress_label = ""
+                self._finish_batch()
+
+    def _finish_batch(self) -> None:
+        """Move the converted files out of the queue and say how it went."""
+        batch, self.batch = self.batch, []
+        if not batch:
+            return
+        ok = [item for item in batch if item.status == "done"]
+        failed = [item for item in batch if item.status == "failed"]
+        self.items = [item for item in self.items if item.status != "done"]
+        for item in self.items:
+            if item.status != "failed":     # keep the failure visible until retried
+                item.status = "waiting"
+            item.fraction = 0.0
+        took = max(0.0, time.time() - self.convert_started)
+        if failed and not ok:
+            self.status = ("%d file%s could not be converted — %s"
+                           % (len(failed), "" if len(failed) == 1 else "s",
+                              failed[0].error))
+            self.status_error = True
+        elif failed:
+            self.status = ("Converted %d file%s in %.1fs, %d failed — left in the "
+                           "list, press CONVERT to retry"
+                           % (len(ok), "" if len(ok) == 1 else "s", took,
+                              len(failed)))
+            self.status_error = True
+        else:
+            self.status = ("Converted %d file%s in %.1fs to %s"
+                           % (len(ok), "" if len(ok) == 1 else "s", took,
+                              self.output_dir))
+            self.status_error = False
 
     # ---------------------------------------------------------------- playback
 
@@ -440,6 +565,10 @@ class App:
             self.settings.extensions = list(chips.EXTENSION_CHANNELS)
         self._save_settings()
 
+    def no_chips(self) -> None:
+        self.settings.extensions = []
+        self._save_settings()
+
     def toggle_bits(self) -> None:
         self.settings.bits = 8 if self.settings.bits > 8 else 16
         self._save_settings()
@@ -465,8 +594,8 @@ class App:
     def _layout(self):
         """Every panel in the window, recomputed from the current size."""
         width, height = self.screen.get_size()
-        outer = pygame.Rect(3, 3, width - 6, height - 6)
-        content = outer.inflate(-6, -6)
+        outer = pygame.Rect(0, 0, width, height)
+        content = outer.inflate(-8, -8)
 
         status_h = 26
         top_h = 108
@@ -494,8 +623,7 @@ class App:
         self.hits = []
         self.mouse = pygame.mouse.get_pos()
         t = self.theme
-        t_bg = t.desktop
-        self.screen.fill(t_bg)
+        self.screen.fill(t.desktop)
 
         outer, content, top, scope, pattern, side, status = self._layout()
         theme.frame(self.screen, outer, t)
@@ -512,6 +640,22 @@ class App:
         self.screen.blit(surface, (x, y))
         return surface
 
+    def _title_bar(self, rect: pygame.Rect) -> pygame.Rect:
+        font = self.fonts["tiny"]
+        height = max(16, font.get_height() + 3)
+        return pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, height)
+
+    def _tiny_buttons(self, panel_rect: pygame.Rect, entries) -> None:
+        """Small switches living in a panel's title line (ALL / NONE / ADD…)."""
+        bar = self._title_bar(panel_rect)
+        x = bar.right - 3
+        for label, action, width in reversed(entries):
+            box = pygame.Rect(x - width, bar.y + 1, width, bar.height - 2)
+            theme.button(self.screen, box, self.theme, label,
+                         self.fonts["tiny"])
+            self.hits.append((box.copy(), action))
+            x = box.x - 4
+
     def _button(self, rect, label, action, pressed=False, enabled=True,
                 primary=False, font="button"):
         theme.button(self.screen, rect, self.theme, label, self.fonts[font],
@@ -524,7 +668,7 @@ class App:
     def _draw_header(self, rect: pygame.Rect) -> None:
         """The FT2 top strip: settings boxes, logo, and what the file contained."""
         t = self.theme
-        self.screen.fill(t.desktop, rect)
+        self.screen.fill(t.desk, rect)
 
         # --- left: the little numeric boxes with arrows, like FT2's tempo boxes
         left = pygame.Rect(rect.x, rect.y, 250, rect.height)
@@ -532,7 +676,7 @@ class App:
         field_font = self.fonts["small"]
 
         def value_box(x, y, w, label, value, action=None):
-            self._text(x, y - 13, label, "tiny", (255, 255, 255))
+            self._text(x, y - 13, label, "tiny", t.dim)
             box = pygame.Rect(x, y, w - 28, 26)
             theme.numeric(self.screen, box, t, value, field_font)
             up = pygame.Rect(box.right + 3, y, 23, 12)
@@ -597,6 +741,11 @@ class App:
                     "drop .mid .vgm .vgz .gym .zip anywhere on this window",
                     "", ""]
         result = self.results[min(self.selected_result, len(self.results) - 1)]
+        if not result.ok:
+            return ["Could not convert %s" % (result.name or "that file"),
+                    (result.error or "unknown problem"),
+                    "the file is still in the list — try another format",
+                    ""]
         lines = list(getattr(result, "analysis_lines", []) or [])
         if not lines:
             lines = ["Converted %s" % os.path.basename(result.wav_path)]
@@ -627,7 +776,7 @@ class App:
     def _draw_scope(self, rect: pygame.Rect) -> None:
         """The row of little waveform boxes FT2 shows for every channel."""
         t = self.theme
-        self.screen.fill(t.desktop, rect)
+        self.screen.fill(t.desk, rect)
         theme.panel(self.screen, rect, t)
         area = pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6)
 
@@ -762,7 +911,7 @@ class App:
 
     def _draw_pattern(self, rect: pygame.Rect) -> None:
         t = self.theme
-        self.screen.fill(t.desktop, rect)
+        self.screen.fill(t.desk, rect)
         theme.panel(self.screen, rect, t)
         page = pygame.Rect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8)
         theme.field(self.screen, page, t, t.field)
@@ -888,12 +1037,6 @@ class App:
                 volume = "%02X" % int(round(max(0, min(15, note.volume)) * 0x40 / 15.0))
                 self.screen.blit(font.render(volume, t.smooth, vol_colour),
                                  (x + 4 + wid + 10 + font.size("0")[0] + 12, y + 3))
-                if len(notes_here) > 1:
-                    # more than one note wanted this cell: mark it, and count the
-                    # hidden ones in the info line rather than silently losing them
-                    self.screen.fill(t.warn, (x + 2, row_rect.bottom - 2,
-                                              cell - 6, 1))
-
         if pages > 1:
             self._draw_jump_strip(
                 pygame.Rect(page.right - jump_w - 18, page.y + head_h, jump_w,
@@ -1025,7 +1168,7 @@ class App:
 
     def _draw_side(self, rect: pygame.Rect) -> None:
         t = self.theme
-        self.screen.fill(t.desktop, rect)
+        self.screen.fill(t.desk, rect)
 
         # --- buttons, two columns, like the FT2 menu column
         button_h = 30
@@ -1033,10 +1176,8 @@ class App:
         rows = [
             (("ADD MUSIC", self.pick_files), ("DEMO", self.add_demo)),
             (("CONVERT", self.start_convert), ("STOP", self.stop)),
-            (("PLAY", lambda: self.play(self.selected_result)),
-             ("SAVE AS", lambda: self.save_result(self.selected_result))),
-            (("FOLDER", lambda: self.open_folder(self.selected_result)),
-             ("ALL CHIPS", self.all_chips)),
+            (("PLAY", self.play_selected), ("SAVE AS", self.save_selected)),
+            (("FOLDER", self.open_folder_selected), ("ALL CHIPS", self.all_chips)),
             (("16-BIT" if self.settings.bits > 8 else "8-BIT", self.toggle_bits),
              (LOOK_LABELS.get(self.look, "LOOK"), self.switch_look)),
         ]
@@ -1047,15 +1188,19 @@ class App:
                 box = pygame.Rect(rect.x + column * (col_w + gap), y,
                                   col_w, button_h)
                 enabled = True
-                if label == "CONVERT":
+                if action == self.start_convert:
+                    label = ("CONVERT %d" % len(self.items) if self.items
+                             else "CONVERT")
                     enabled = bool(self.items) and not self.busy
                     self.convert_rect = box.copy()
-                if label in ("PLAY", "SAVE AS", "FOLDER"):
+                if action in (self.play_selected, self.save_selected,
+                              self.open_folder_selected):
                     enabled = bool(self.results)
-                    if label == "PLAY":
+                    if action == self.play_selected:
                         self.play_rect = box.copy()
                 self._button(box, label, action, pressed=(
-                    label == "CONVERT" and self.busy), enabled=enabled)
+                    action == self.start_convert and self.busy),
+                    enabled=enabled)
             y += button_h + gap
 
         # --- chips: two columns, one row per chip, like FT2's button blocks
@@ -1067,6 +1212,8 @@ class App:
         chips_h = rows_needed * row_h + 28
         chips_box = pygame.Rect(rect.x, y + 2, rect.width, chips_h)
         inner = theme.panel(self.screen, chips_box, t, "CHIPS", self.fonts["tiny"])
+        self._tiny_buttons(chips_box, (("ALL", self.all_chips, 44),
+                                       ("NONE", self.no_chips, 52)))
         theme.field(self.screen, inner, t, t.field)
         self.chip_rects = []
         col_w = inner.width // 2
@@ -1093,42 +1240,108 @@ class App:
             if name:
                 self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
 
-        # --- queue and results share the rest of the column
+        # --- queue: one row per file with its own status, so a batch is visible
         rest = rect.bottom - chips_box.bottom - 6
-        queue_h = max(72, min(112, rest // 3))
+        queue_h = max(112, min(168, int(rest * 0.46)))
         queue_box = pygame.Rect(rect.x, chips_box.bottom + 6, rect.width, queue_h)
         inner = theme.panel(self.screen, queue_box, t,
                             "FILES TO CONVERT  %d" % len(self.items),
                             self.fonts["tiny"])
-        theme.field(self.screen, inner, t, t.field)
-        self.queue_view = inner
-        self.mouse_in_queue = inner.collidepoint(self.mouse)
-        row_h = 24
-        visible = max(1, inner.height // row_h)
+        self._tiny_buttons(queue_box, (("ADD", self.pick_files, 46),
+                                       ("CLEAR", self.clear_queue, 62)))
+        footer_h = 22
+        footer = pygame.Rect(inner.x, inner.bottom - footer_h, inner.width,
+                             footer_h)
+        self.screen.fill(t.face, footer)
+        self.screen.fill(t.groove, (footer.x, footer.y, footer.width, 1))
+        view = pygame.Rect(inner.x, inner.y, inner.width,
+                           inner.height - footer_h - 3)
+        theme.field(self.screen, view, t, t.field)
+        self.queue_view = view
+        self.mouse_in_queue = view.collidepoint(self.mouse)
+        row_h = 26
+        visible = max(1, view.height // row_h)
         self.scroll_queue = max(0, min(self.scroll_queue,
                                        max(0, len(self.items) - visible)))
         if not self.items:
-            self._text(inner.x + 6, inner.y + 5, "drop files here", "small",
-                       t.pattern_empty)
+            self._text(view.x + 6, view.y + 6, "drop music here, or ADD",
+                       "small", t.pattern_empty)
+            self._text(view.x + 6, view.y + 26,
+                       "MIDI · VGM · GYM · ZIP", "tiny", t.pattern_empty)
         for slot in range(min(visible, len(self.items) - self.scroll_queue)):
             index = slot + self.scroll_queue
             item = self.items[index]
-            row = pygame.Rect(inner.x + 2, inner.y + 2 + slot * row_h,
-                              inner.width - 4, row_h - 2)
-            if row.collidepoint(self.mouse):
-                self.screen.fill(t.playing, row)
-            self._text(row.x + 4, row.y + 3,
-                       _fit(self.fonts["small"], item.name, row.width - 46),
-                       "small", t.field_text)
-            close = pygame.Rect(row.right - 26, row.y + 3, 24, row_h - 8)
+            row = pygame.Rect(view.x + 2, view.y + 2 + slot * row_h,
+                              view.width - 4, row_h - 2)
+            working = item.status == "working"
+            failed = item.status == "failed"
+            if working:
+                self.screen.fill(t.accent_dark, row)
+            elif row.collidepoint(self.mouse):
+                self.screen.fill(t.stripe, row)
+            self._text(row.x + 3, row.y + 3, "%02d" % (index + 1), "head",
+                       t.bad if failed else t.pattern_vol)
+            name_colour = t.bad if failed else (t.playing_text if working
+                                                else t.field_text)
+            self._text(row.x + 30, row.y + 3,
+                       _fit(self.fonts["small"], item.name, row.width - 106),
+                       "small", name_colour)
+            if failed:
+                tag, colour = "FAIL", t.bad
+            elif working:
+                tag, colour = "%d%%" % int(item.fraction * 100), t.playing_text
+            else:
+                tag, colour = "WAIT", t.pattern_empty
+            tag_surface = self.fonts["tiny"].render(tag, t.smooth, colour)
+            self.screen.blit(tag_surface,
+                             (row.right - tag_surface.get_width() - 30, row.y + 4))
+            close = pygame.Rect(row.right - 24, row.y + 3, 22, row_h - 8)
             theme.button(self.screen, close, t, "x", self.fonts["tiny"])
             self.hits.append((close.copy(), (lambda i=index: self.remove_item(i))))
+            if working:
+                filled = int((row.width - 8) * max(0.0, min(1.0, item.fraction)))
+                self.screen.fill(t.pattern_empty,
+                                 (row.x + 4, row.bottom - 5, row.width - 8, 3))
+                self.screen.fill(t.accent,
+                                 (row.x + 4, row.bottom - 5, filled, 3))
+            elif failed and item.error:
+                self._text(row.x + 30, row.y + 13,
+                           _fit(self.fonts["tiny"], item.error, row.width - 40),
+                           "tiny", t.bad)
+
+        # footer: where the files land, or how far the batch has got
+        if self.busy:
+            finished = sum(1 for item in self.batch if item.status in ("done",
+                                                                      "failed"))
+            label = "%d/%d  %s" % (min(finished + 1, len(self.batch)),
+                                   len(self.batch), self.progress_label or "")
+            self._text(footer.x, footer.y + 3,
+                       _fit(self.fonts["tiny"], label, footer.width - 52),
+                       "tiny", t.text)
+            percent = self.fonts["tiny"].render(
+                "%d%%" % int(self.progress * 100), t.smooth, t.text)
+            self.screen.blit(percent, (footer.right - percent.get_width(),
+                                       footer.y + 3))
+            filled = int(footer.width * max(0.0, min(1.0, self.progress)))
+            self.screen.fill(t.pattern_empty,
+                             (footer.x, footer.bottom - 3, footer.width, 3))
+            self.screen.fill(t.accent,
+                             (footer.x, footer.bottom - 3, filled, 3))
+        else:
+            label = self.fonts["tiny"].render("SAVE TO", t.smooth, t.dim)
+            self.screen.blit(label, (footer.x, footer.y + 3))
+            self._text(footer.x + label.get_width() + 8, footer.y + 3,
+                       _fit(self.fonts["tiny"], self.output_dir,
+                            footer.width - label.get_width() - 12),
+                       "tiny", t.text)
+            self.hits.append((footer.copy(), self.open_output_dir))
         self.hits.append((queue_box, self.pick_files))
 
         results_box = pygame.Rect(rect.x, queue_box.bottom + 6, rect.width,
                                   rect.bottom - queue_box.bottom - 6)
         inner = theme.panel(self.screen, results_box, t,
                             "CONVERTED  %d" % len(self.results), self.fonts["tiny"])
+        self._tiny_buttons(results_box, (("OPEN", self.open_output_dir, 56),))
         theme.field(self.screen, inner, t, t.field)
         self.results_view = inner
         self.mouse_in_results = inner.collidepoint(self.mouse)
@@ -1137,7 +1350,7 @@ class App:
         self.scroll_results = max(0, min(self.scroll_results,
                                          max(0, len(self.results) - visible)))
         if not self.results:
-            self._text(inner.x + 6, inner.y + 5, "nothing converted yet", "small",
+            self._text(inner.x + 6, inner.y + 6, "nothing converted yet", "small",
                        t.pattern_empty)
         for slot in range(min(visible, len(self.results) - self.scroll_results)):
             index = slot + self.scroll_results
@@ -1150,29 +1363,44 @@ class App:
             elif row.collidepoint(self.mouse):
                 self.screen.fill(t.stripe, row)
             self._text(row.x + 4, row.y + 2, "%02d" % (index + 1), "head",
-                       t.pattern_vol)
+                       t.playing_text if selected else t.pattern_vol)
+            duration = ""
+            if result.ok and result.seconds:
+                minutes, seconds = divmod(int(round(result.seconds)), 60)
+                duration = "%d:%02d" % (minutes, seconds)
+            name = os.path.basename(result.wav_path) or result.name or "file"
             self._text(row.x + 30, row.y + 2,
-                       _fit(self.fonts["small"],
-                            os.path.basename(result.wav_path), row.width - 34),
-                       "small", t.playing_text if selected else t.field_text)
+                       _fit(self.fonts["small"], name,
+                            row.width - 34 - self.fonts["tiny"].size(duration)[0]),
+                       "small", t.bad if not result.ok else
+                       (t.playing_text if selected else t.field_text))
+            if duration:
+                clock = self.fonts["tiny"].render(duration, t.smooth,
+                                                  t.playing_text if selected
+                                                  else t.pattern_inst)
+                self.screen.blit(clock, (row.right - clock.get_width() - 4,
+                                         row.y + 3))
             if result.ok:
-                line = "%d voices · %d kept · %d left out" % (
+                line = "%d voices · %d kept · %d out" % (
                     result.voices, result.kept, result.left_out)
                 if getattr(result, "thinned", 0):
                     line += " · %d thinned" % result.thinned
             else:
-                line = "failed: " + (result.error or "")
-            self._text(row.x + 30, row.y + 20,
+                line = "failed — " + (result.error or "unknown problem")
+            self._text(row.x + 30, row.y + 21,
                        _fit(self.fonts["tiny"], line, row.width - 34), "tiny",
-                       t.pattern_inst if selected else t.pattern_vol)
+                       t.bad if not result.ok else (t.pattern_inst if selected
+                                                    else t.pattern_vol))
             self.hits.append((row.copy(), (lambda i=index: self.select_result(i))))
 
-        if self.busy:
-            well = pygame.Rect(inner.x + 4, inner.bottom - 14, inner.width - 8, 10)
-            theme.field(self.screen, well, t, t.accent_dark)
-            filled = int((well.width - 4) * max(0.0, min(1.0, self.progress)))
-            self.screen.fill(t.frame, pygame.Rect(well.x + 2, well.y + 2,
-                                                  filled, well.height - 4))
+    def play_selected(self) -> None:
+        self.play(self.selected_result)
+
+    def save_selected(self) -> None:
+        self.save_result(self.selected_result)
+
+    def open_folder_selected(self) -> None:
+        self.open_folder(self.selected_result)
 
     def select_result(self, index: int) -> None:
         if 0 <= index < len(self.results):
@@ -1184,7 +1412,7 @@ class App:
 
     def _draw_status(self, rect: pygame.Rect) -> None:
         t = self.theme
-        self.screen.fill(t.desktop, rect)
+        self.screen.fill(t.desk, rect)
         theme.panel(self.screen, rect, t)
         inner = rect.inflate(-8, -6)
         message = self.progress_label if self.busy else self.status
@@ -1298,6 +1526,8 @@ def selftest(screenshot: Optional[str] = None) -> int:
 
         app.add_demo()
         check("demo queued", len(app.items) == 1)
+        check("queued file starts as waiting",
+              app.items[0].status == "waiting", app.items[0].status)
         click(app.convert_rect)
         deadline = time.time() + 120
         while app.busy and time.time() < deadline:
@@ -1306,10 +1536,18 @@ def selftest(screenshot: Optional[str] = None) -> int:
             time.sleep(0.02)
         check("conversion finished", not app.busy)
         check("one result", len(app.results) == 1)
+        check("the converted file left the queue", not app.items,
+              str([(i.name, i.status) for i in app.items]))
+        check("the status line says what happened",
+              "Converted 1 file" in app.status, app.status)
         if app.results:
             result = app.results[0]
             check("result ok", result.ok, result.error)
             check("wav on disk", os.path.isfile(result.wav_path))
+            check("wav lands in the folder the window shows",
+                  os.path.dirname(result.wav_path) == app.output_dir,
+                  "%s vs %s" % (os.path.dirname(result.wav_path),
+                                app.output_dir))
             check("understood the file", bool(result.analysis_lines),
                   str(result.analysis_lines))
             check("ten or more voices", result.voices >= 10, str(result.voices))
@@ -1361,6 +1599,53 @@ def selftest(screenshot: Optional[str] = None) -> int:
             app.draw()
             check("pattern page fills the window",
                   app.pattern_height > 300, str(app.pattern_height))
+
+        # --- a file that cannot be converted must not stop the batch
+        missing = os.path.join(tempfile.gettempdir(), "chip8bit-not-music.txt")
+        with open(missing, "w") as handle:
+            handle.write("this is not music")
+        before = app.status
+        app.add_path(missing)
+        check("an unreadable extension is refused straight away",
+              "Can't read" in app.status and app.status != before, app.status)
+
+        broken = os.path.join(tempfile.gettempdir(), "chip8bit-broken.mid")
+        with open(broken, "wb") as handle:
+            handle.write(b"not really a midi file")
+        app.add_path(broken)
+        check("a bogus .mid is still queued so it can be tried",
+              any(item.path == broken for item in app.items))
+        app.start_convert()
+        deadline = time.time() + 60
+        while app.busy and time.time() < deadline:
+            app._drain()
+            time.sleep(0.02)
+        failed = [item for item in app.items if item.path == broken]
+        check("a failed file stays in the queue to retry", bool(failed),
+              str([(i.name, i.status) for i in app.items]))
+        check("the failure is reported", app.status_error and failed
+              and failed[0].status == "failed", app.status)
+        app.draw()
+        check("a failed result still has a name in CONVERTED",
+              bool(app.results) and bool(app.results[0].name))
+        app.remove_item(app.items.index(failed[0]) if failed else 0)
+        check("a failed file can be removed",
+              not any(item.path == broken for item in app.items))
+
+        # --- the little switches in the panel title lines
+        app.draw()
+        none_rect = None
+        for rect, action in app.hits:
+            if getattr(action, "__func__", None) is not None and \
+                    getattr(action, "__func__", None).__name__ == "no_chips":
+                none_rect = rect
+        check("NONE turns every extension chip off",
+              click(none_rect) if none_rect else False)
+        check("no extensions left", app.settings.extensions == [],
+              str(app.settings.extensions))
+        app.all_chips()
+        check("ALL turns them back on", len(app.settings.extensions) == 6,
+              str(len(app.settings.extensions)))
 
         if screenshot:
             base, extension = os.path.splitext(screenshot)

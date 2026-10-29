@@ -3,11 +3,11 @@
 Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, or a `.zip` of them) and
 re-composes them for the NES sound chip, then renders 8-bit audio.
 
-* **its own window, in 1995** — the window is a FastTracker II desk: the blue
-  frame, lavender buttons, per-channel waveform scopes, the pattern page with
-  row numbers down the side of every four channels and hex note/instrument/volume
-  columns. Windows 95 and Amiga Workbench looks are one click away; no browser,
-  no server, no install;
+* **its own window, in 1995** — a FastTracker II desk: a thin blue window edge, one
+  lavender surface with every panel cut into it, per-channel waveform scopes, and the
+  pattern page with row numbers down the side of every four channels and hex
+  note/instrument/volume columns. Windows 95 and Amiga Workbench looks are one click
+  away; no browser, no server, no install;
 * **it reads the MIDI before it converts it** — tracks are split into monophonic
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
@@ -30,46 +30,69 @@ re-composes them for the NES sound chip, then renders 8-bit audio.
 ![the chip8bit window, FastTracker II look](docs/window-tracker.png)
 
 Double-click **`chip8bit.exe`**. Its own window opens (pygame/SDL — a normal desktop
-window, no browser anywhere):
+window, no browser anywhere), laid out like FastTracker II v2.04: one lavender desk
+with the panels **cut into** it, so nothing floats on a coloured background.
 
-1. **Add music** — drag files onto the window, or press *Add files…* (the real
-   Windows file dialog). MIDI, VGM/VGZ, GYM, and `.zip` of any of those.
-   *Demo tune* loads something to play with immediately.
-2. **Pick chips** — tick the extension chips in the `CHIPS` box (each row shows how
-   many voices it adds). `VOICES` in the header goes 4 → 22. Your choices are
-   remembered between runs.
-3. **Convert** — press *Convert*. The header boxes then tell you what the converter
-   understood: `120 BPM · 4/4 · 8.0 s · 169 notes`, `Instr: Lead 2 (sawtooth), Lead 1
-   (square)…`, `Found 1 melody, 2 counter, 1 bass, 6 harmony, 1 drum (11 voices)`,
-   and `164 notes kept · 8 left out (no free channel)`.
+1. **Add music** — drag files onto the window, press *ADD MUSIC* (the real Windows
+   file dialog), or drop them straight onto `chip8bit.exe`. MIDI, VGM/VGZ, GYM, and
+   `.zip` of any of those. Anything else is refused immediately with the reason
+   rather than failing halfway through a batch. *DEMO* queues a tune to play with.
+2. **Pick chips** — the `CHIPS` box lists what each extension chip adds; `ALL` and
+   `NONE` in its title line switch the whole set. `VOICES` and `CHIPS` in the header
+   follow along (4 → 22 voices). The choice is remembered between runs.
+3. **Convert** — press *CONVERT*. The button counts what is waiting (`CONVERT 3`)
+   and the list keeps you posted, one row per file:
 
-### The pattern grid
+   ```
+   FILES TO CONVERT  3                       [ADD] [CLEAR]
+   01  nsmb_athletic.mid                            100%  [x]
+   02  chip8bit demo tune.mid                        WAIT  [x]
+   03  broken.mid                                    WAIT  [x]
+   1/3  nsmb_athletic.mid — Rendering                    33%
+   SAVE TO  C:\Users\you\Music\chip8bit
+   ```
 
-The big panel is a tracker pattern, built from what actually went to the chips — not
+   A song that fails comes back red with the reason, **stays in the list**, and
+   *CONVERT* retries it — the rest of the batch is never abandoned. *STOP* silences
+   playback. `ENTER` also starts a conversion.
+4. **Listen and take it away** — converted songs appear under `CONVERTED` with their
+   length, voice count and `notes kept · left out`; click one to select it, *PLAY*
+   plays it, *SAVE AS* copies it anywhere, *OPEN* (or the `SAVE TO` line) shows the
+   output folder in Explorer. The files are already on disk in that folder — saving
+   a copy elsewhere is optional.
+
+`WHAT I FOUND` in the header shows the analysis of the selected song: the
+instruments it identified, how the tracks were split into voices, and
+`2980 notes kept · 6 left out · 7 lines thinned`.
+
+### The pattern page
+
+The big panel is a tracker pattern built from what actually went to the chips — not
 a mock-up:
-
-```
-00  C-4 50 33  G-3 59 26  F#2 00 33  E-4 50 2B  C-5 51 2F
-01  --- .. ..  --- .. ..
-```
 
 * one column per voice: `PU1 PU2 TRI NOI` and, with chips on, `V6-1 V6-2 V6S M5-1
   M5-2 FDS N1…N8 PSG1..3 DMC`;
-* `note · instrument · volume` in hex, exactly the tracker layout (`C-4 50 33`);
-* every fourth row is striped, the playing row is highlighted and the pattern
-  scrolls to follow the music;
-* **click any row to start playing from there**; arrow keys / Page Up/Down /
-  mouse wheel scroll rows, Shift+wheel or ←/→ scroll the channel columns; a longer
-  conversion than the panel fits gets a scrollbar.
+* `note · instrument · volume` in hex, the tracker layout (`C-4 50 33`);
+* row numbers `00`…`3F` repeated at the head of every four channels, with blue gaps
+  between the groups, every fourth row striped, and the playing row highlighted and
+  scrolled into view;
+* the info line: `PAT 00:12  TIME 12.4s / 153.0s  BPM 226  22 VOICES` — and if two
+  notes ever want the same cell, `+9 SHARED` counts them instead of hiding them;
+* **click any row to play from there**; the row length is chosen from the music, so
+  a 226 BPM tune still shows all of its notes. Wheel / Page Up/Down / arrows scroll
+  the rows, Shift+wheel or ←/→ the channels, and a long song gets a page list down
+  the right edge.
 
-The look button in the header cycles **FT2 (FastTracker II, the default) → Windows
-95 → Amiga Workbench**. The choice is remembered.
+### The three looks
+
+The look button cycles **FT2 (FastTracker II, the default) → Windows 95 → Amiga
+Workbench**. Same geometry, same panels, three very different wardrobes; the choice
+is remembered.
 
 | FT2 (default) | Windows 95 | Amiga Workbench |
 | --- | --- | --- |
 | ![FT2 look](docs/window-tracker.png) | ![Windows 95 look](docs/window-win95.png) | ![Amiga look](docs/window-amiga.png) |
 
-Files dropped **straight onto `chip8bit.exe`** open the window with them queued.
 Everything happens on your machine; nothing is uploaded and no port is opened.
 
 ## Command line

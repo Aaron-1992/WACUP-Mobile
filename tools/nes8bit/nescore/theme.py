@@ -37,6 +37,7 @@ class Theme:
     bad: Color
     ok: Color
 
+    desk: Color = (0, 0, 0)   # the surface the panels are cut into
     title_height: int = 22
     border: int = 2
     rounded: int = 0
@@ -44,6 +45,7 @@ class Theme:
     smooth: bool = False      # antialias text (FT2 look) or keep it chunky?
 
     # the window frame around the panels
+    groove: Color = (0, 0, 0)     # the line that cuts a panel into the desk
     frame: Color = (0, 0, 0)
     frame_light: Color = (255, 255, 255)
 
@@ -75,6 +77,8 @@ TRACKER = Theme(
     name="FastTracker II",
     desktop=(40, 85, 134),
     face=(150, 150, 182),
+    desk=(122, 122, 156),          # panels are cut into a slightly darker lavender desk
+    groove=(16, 32, 52),
     face_alt=(150, 150, 182),
     light=(231, 231, 255),
     shadow=(16, 32, 52),
@@ -116,6 +120,8 @@ WIN95 = Theme(
     name="Windows 95",
     desktop=(0, 128, 128),          # the classic teal desktop
     face=(192, 192, 192),
+    desk=(192, 192, 192),
+    groove=(64, 64, 64),
     face_alt=(192, 192, 192),
     light=(255, 255, 255),
     shadow=(128, 128, 128),
@@ -154,6 +160,8 @@ AMIGA = Theme(
     name="Amiga Workbench",
     desktop=(0, 85, 170),           # Workbench 1.x blue
     face=(160, 160, 160),
+    desk=(160, 160, 160),
+    groove=(85, 85, 85),
     face_alt=(170, 170, 170),
     light=(238, 238, 238),
     shadow=(85, 85, 85),
@@ -244,6 +252,27 @@ def outline(surface, rect, color, width: int = 1) -> None:
         surface.fill(color, (box.right - 1, box.y, 1, box.height))
 
 
+def inset(surface, rect, theme: Theme, width: int = 1,
+          fill=None) -> pygame.Rect:
+    """A panel cut *into* the desk: black edge, shadow top-left, light bottom-right.
+
+    Used for every panel in the window so the boxes look inserted in one surface
+    instead of floating on a coloured background.
+    """
+    surface.fill(theme.face if fill is None else fill, rect)
+    outline(surface, rect, theme.dark, 1)
+    w = max(0, min(width, rect.width // 2 - 1, rect.height // 2 - 1))
+    for step in range(w):
+        box = rect.inflate(-2 - 2 * step, -2 - 2 * step)
+        if box.width <= 0 or box.height <= 0:
+            break
+        surface.fill(theme.groove, (box.x, box.y, box.width, 1))
+        surface.fill(theme.groove, (box.x, box.y, 1, box.height))
+        surface.fill(theme.light, (box.x, box.bottom - 1, box.width, 1))
+        surface.fill(theme.light, (box.right - 1, box.y, 1, box.height))
+    return rect.inflate(-4, -4)
+
+
 def frame(surface, rect, theme: Theme) -> pygame.Rect:
     """The window frame: black outline, coloured frame, inside that the content."""
     surface.fill(theme.dark, rect)
@@ -256,20 +285,20 @@ def frame(surface, rect, theme: Theme) -> pygame.Rect:
 
 def panel(surface, rect, theme: Theme, title: str = "", font=None,
           bar: bool = True) -> pygame.Rect:
-    """A raised panel with an optional lavender title bar."""
-    surface.fill(theme.face, rect)
-    raised(surface, rect, theme, 2)
+    """A panel cut into the desk, with an optional title line."""
+    inset(surface, rect, theme, 1)
     if not title or font is None or not bar:
         return rect.inflate(-6, -6)
     height = max(16, font.get_height() + 3)
-    bar_rect = pygame.Rect(rect.x + 2, rect.y + 2, rect.width - 4, height)
+    bar_rect = pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, height)
     surface.fill(theme.face_alt, bar_rect)
-    raised(surface, bar_rect, theme, 1)
+    surface.fill(theme.groove, (bar_rect.x, bar_rect.bottom - 1,
+                                bar_rect.width, 1))
     label = font.render(title, theme.smooth, theme.text)
     surface.blit(label, (bar_rect.x + 4,
                          bar_rect.centery - label.get_height() // 2 + 1))
-    return pygame.Rect(rect.x + 4, bar_rect.bottom + 3,
-                       rect.width - 8, rect.bottom - bar_rect.bottom - 5)
+    return pygame.Rect(rect.x + 5, bar_rect.bottom + 3,
+                       rect.width - 10, rect.bottom - bar_rect.bottom - 5)
 
 
 def field(surface, rect, theme: Theme, color=None) -> None:
