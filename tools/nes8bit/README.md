@@ -12,7 +12,8 @@ re-composes them for the NES sound chip, then renders 8-bit audio.
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
 * **sampled drums** — kick, snare, hats, toms and cymbals are real samples played
-  through the console's delta channel, not noise bursts pretending to be drums;
+  through the console's delta channel, not noise bursts pretending to be drums,
+  and the kit is levelled like a kit instead of like eight separate files;
 * **no click-and-fizz** — every note has an attack and a release, and the mix is
   gently filtered, so it sounds like music rather than a test tone;
 * **every hardware voice is used, and extension chips can be switched on** (4 → 22);
@@ -191,15 +192,43 @@ which lines were thinned and why.
 
 ## How it sounds
 
+The point is not "sounds 8-bit", it is "sounds like a chip tune someone cared
+about". Two things do most of that work, and they are the two a conversion usually
+skips.
+
+**Every voice is levelled against the others.** The chip cannot balance itself: a
+pulse at volume 15, the triangle at volume 15 and a sampled kit are not equally
+loud, and a MIDI file written at wildly different velocities arrives with the lead
+and the harmony 18 dB apart. After rendering, each voice is measured over the parts
+where it actually plays and nudged towards the level its role belongs at (lead on
+top, counter line 3.5 dB under it, drums 3 dB, bass 5, harmony 7). The correction is
+capped at 14 dB, so it fixes a broken balance without re-writing the arrangement.
+Measured on a full-band MIDI: **18 dB of spread before, 7 dB after** — and by
+design, not by accident.
+
+**Every instrument gets its own envelope.** A square wave with one generic fade does
+not sound like a clarinet, a piano or a pad. The MIDI program decides the shape:
+a piano or a plucked string starts instantly and dies away (23 dB across a one-second
+note), an organ holds flat, strings and pads swell in over 60–120 ms, brass blats and
+settles, and anything sustained gets a little delayed vibrato the way a player's does.
+
 | piece | what it does |
 | --- | --- |
-| drums | a 17-piece kit (kick, snare, rim, clap, hats, ride, crash, toms, tambourine, shaker, cowbell, claves, bongos, congas) synthesised from scratch and quantised to the delta channel's 7-bit 33.1 kHz output — the grit is deliberate |
-| notes | 4 ms attack, musical decay, 12 ms release: no digital snaps |
-| pulses | 12.5/25/50/75 % duty, 4-bit volume, vibrato follows the MIDI CC1 |
+| drums | a 17-piece kit synthesised from scratch — pitch-dropping kick with a beater click, two-head snare with a wire rattle, metallic 808-style hats, tuned toms with an overtone and skin noise, crash/ride with inharmonic partials — level-matched as a kit (hats 8.5 dB under the kick), with short early reflections and 7-bit noise-shaped quantisation so the decay is gritty but not buzzy |
+| kick, tom | the delta channel plays them at 33.1 kHz, 7-bit, which is where the grit comes from |
+| hits vary | every repeat gets a deterministic ±1.2 % length and ±0.6 dB, so a run of sixteenth hats is not a machine gun |
+| notes | instrument-specific attack/decay/release, 4-bit volume steps, no digital snaps |
+| pulses | 12.5/25/50/75 % duty chosen from the instrument *and* the register — thin on top so high notes are not sirens, wide at the bottom for body |
 | triangle | the real 32-step staircase, no volume control (that is the point) |
 | VRC6 / MMC5 / FDS / N163 / PSG | sawtooth, extra pulses, and wavetables, each rendered the way its chip does it |
-| output | gentle low-pass, DC blocker, then the APU's non-linear mixer curve |
+| echo | a tempo-aware delayed copy (two rows of the song's own grid, 13 % mix, two taps) — the "second pulse" trick, because the console had no reverb |
+| master | gentle low-pass, DC blocker, the APU's non-linear mixer curve, then a peak limiter so the drums keep their punch without the whole tune being turned down for them |
+| result | 226 BPM full-band test tune: RMS 0.216 (was 0.198), quiet windows 0 of 3057 (was 15), short-term level spread 4.9 dB (was 6.8) |
 
+Samples are shipped as rendered audio, so there is no sample library to install —
+and no copyrighted sample data anywhere: the kit is maths.
+
+## Honest limits
 ## Honest limits
 
 * VGM can only address the NES APU and the SN76489, so `--export-vgm` leaves the

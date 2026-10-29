@@ -3,6 +3,7 @@
 Run with:  python tests/run_tests.py
 """
 
+import math
 import os
 import struct
 import sys
@@ -16,6 +17,8 @@ sys.path.insert(0, HERE)
 
 import make_test_midi                                     # noqa: E402
 from nescore import analyze, chips, importers              # noqa: E402
+from nescore import mix as mix_module                     # noqa: E402
+from nescore import samples as samples_module              # noqa: E402
 from nescore import arrange as arrange_module             # noqa: E402
 from nescore.arrange import Options, arrange               # noqa: E402
 from nescore.cli import main                               # noqa: E402
@@ -261,6 +264,98 @@ def main_test() -> None:
                                      level.get("bass", 0)))
     check("the drums are audible", level.get("drum", 0.0) > 0.25 * level.get("melody", 0),
           "drum %.3f melody %.3f" % (level.get("drum", 0), level.get("melody", 0)))
+
+    print("balancing the voices (the loudness the listener actually hears)")
+    roles = mix_module.channel_roles(
+        {channel: [n for n in all_notes if n.channel == channel]
+         for channel in ext_stems})
+    stem_levels = {channel: 20.0 * __import__("math").log10(
+        max(1e-6, mix_module._active_level(buf)))
+        for channel, buf in ext_stems.items()}
+    gains = mix_module.balance(ext_stems, roles)
+    after = {channel: level + 20.0 * __import__("math").log10(max(1e-6, gains[channel]))
+             for channel, level in stem_levels.items()}
+    before_spread = max(stem_levels.values()) - min(stem_levels.values())
+    after_spread = max(after.values()) - min(after.values())
+    check("every voice is measured", len(stem_levels) == len(ext_stems),
+          "%d of %d" % (len(stem_levels), len(ext_stems)))
+    check("the balance closes the gap between voices",
+          after_spread < before_spread - 2.0,
+          "%.1f dB -> %.1f dB" % (before_spread, after_spread))
+    check("no voice is more than 20 dB under the lead",
+          min(after.values()) > max(after.values()) - 20.0,
+          "%.1f .. %.1f dB" % (min(after.values()), max(after.values())))
+    check("the equaliser never rewrites the arrangement",
+          all(0.05 < gain < 20.0 for gain in gains.values()),
+          str(sorted(round(g, 2) for g in gains.values())))
+
+    print("instruments have their own envelopes")
+    pulse_spec = chips.channel_by_id(all_channels, "pulse1")
+
+    def curve(program: int, role: str = "melody"):
+        note = Note(start=0.0, dur=1.0, pitch=64, velocity=110, volume=15,
+                    duty=0.5, role=role, program=program)
+        buf = render_channel([note], pulse_spec, RenderOptions(rate=44100), 44100)
+
+        def level(at):
+            chunk = buf[int(at * 44100):int(at * 44100) + 2205]
+            return (sum(v * v for v in chunk) / max(1, len(chunk))) ** 0.5
+        return level(0.05), level(0.45), level(0.95)
+
+    piano = curve(0)
+    organ = curve(16)
+    strings = curve(48)
+    check("a piano dies away under the finger",
+          piano[2] < piano[0] * 0.25,
+          "%.3f -> %.3f" % (piano[0], piano[2]))
+    check("an organ holds its level",
+          organ[2] > organ[0] * 0.75, "%.3f -> %.3f" % (organ[0], organ[2]))
+    check("strings swell in instead of clicking on",
+          strings[1] > strings[0] * 1.05 or strings[0] > 0.8 * strings[1],
+          "%.3f -> %.3f" % (strings[0], strings[1]))
+    def drop_db(levels):
+        return 20.0 * math.log10(max(1e-9, levels[0]) / max(1e-9, levels[2]))
+    check("a struck note is not flat, a held one is",
+          drop_db(piano) > drop_db(organ) + 8.0,
+          "piano -%.1f dB, organ -%.1f dB" % (drop_db(piano), drop_db(organ)))
+
+    print("the drum kit is balanced like a kit")
+    def piece_rms(name):
+        buf = samples_module.get(name)
+        return (sum(v * v for v in buf) / max(1, len(buf))) ** 0.5
+    kick = piece_rms("kick")
+    snare = piece_rms("snare")
+    hat = piece_rms("hat")
+    check("the snare sits with the kick",
+          0.4 < snare / kick < 1.2, "%.2f" % (snare / kick))
+    check("the hats sit under the drums",
+          hat / kick < 0.45, "%.2f" % (hat / kick))
+    check("every piece has room for its transient",
+          all(max((abs(v) for v in samples_module.get(name))) > 0.3
+              for name in ("kick", "snare", "hat", "crash", "tom_low")))
+
+    print("the echo is a tail, not a wash")
+    plain = [math.sin(0.05 * i) if i < 2000 else 0.0 for i in range(44100)]
+    echoed = mix_module.echo(list(plain), 44100)
+    tail_plain = sum(abs(v) for v in plain[6000:12000])
+    tail_echo = sum(abs(v) for v in echoed[6000:12000])
+    body_plain = sum(abs(v) for v in plain[0:2000])
+    body_echo = sum(abs(v) for v in echoed[0:2000])
+    check("the echo puts sound where there was none", tail_echo > tail_plain)
+    check("the echo leaves the original hit intact",
+          abs(body_echo - body_plain) < 0.02 * max(1e-9, body_plain) + 1.0)
+
+    print("the master stays clean")
+    demo_pcm = render(all_notes, all_channels, RenderOptions(rate=44100), {})[0]
+    peak = max(abs(v - 128) for v in demo_pcm) if demo_pcm else 0
+    check("nothing clips", peak <= 128, str(peak))
+    check("there is signal", peak > 20, str(peak))
+    with_echo = render(all_notes, all_channels,
+                       RenderOptions(rate=44100, echo=False), {})[0]
+    check("the effect chain can be switched off",
+          with_echo != demo_pcm)
+    again = render(all_notes, all_channels, RenderOptions(rate=44100), {})[0]
+    check("the same input renders the same bytes", again == demo_pcm)
 
     print("synthesis accuracy (measured by zero crossings)")
     every_channel = chips.build_channel_set(list(chips.EXTENSION_CHANNELS))

@@ -117,6 +117,10 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
         gain=args.gain,
         nonlinear=not args.linear,
         max_seconds=args.max_seconds,
+        equalise=not args.no_balance,
+        echo=not args.no_echo,
+        limit=not args.no_limit,
+        compress=bool(args.compress),
     )
 
     grouped = {}
@@ -180,6 +184,14 @@ def main(argv=None) -> int:
     parser.add_argument("--stereo", action="store_true", help="duplicate to two channels")
     parser.add_argument("--gain", type=float, default=0.9, help="headroom, 0.1-1.0")
     parser.add_argument("--linear", action="store_true", help="skip the NES mixer curve")
+    parser.add_argument("--no-balance", action="store_true",
+                        help="do not level the voices against each other")
+    parser.add_argument("--no-echo", action="store_true",
+                        help="no NES-style echo on the mix")
+    parser.add_argument("--no-limit", action="store_true",
+                        help="no peak limiting on the master")
+    parser.add_argument("--compress", action="store_true",
+                        help="extra bus compression on the master")
     parser.add_argument("--no-sharing", action="store_true",
                         help="default: notes that find no free voice are left out")
     parser.add_argument("--sharing", action="store_true",

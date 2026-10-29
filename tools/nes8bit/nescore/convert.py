@@ -28,6 +28,10 @@ class Settings:
     stereo: bool = False
     export_vgm: bool = False
     gain: float = 0.9
+    equalise: bool = True          # balance the voices against each other
+    echo: bool = True              # the NES "second pulse" delay
+    limit: bool = True             # peak limiting instead of turning everything down
+    compress: bool = False         # extra master compression, off by default
 
     def channels(self):
         return chips.build_channel_set(
@@ -51,6 +55,10 @@ class Settings:
             stereo=self.stereo,
             gain=float(self.gain),
             sampled_drums=self.sampled_drums,
+            equalise=self.equalise,
+            echo=self.echo,
+            limit=self.limit,
+            compress=self.compress,
         )
 
 
@@ -78,6 +86,7 @@ class Result:
     source_format: str = ""
     source_notes: int = 0
     render_seconds: float = 0.0
+    stems: Dict[str, list] = field(default_factory=dict)   # per-channel audio, for checks
 
 
 def output_name(source: str, settings: Settings) -> str:
@@ -143,7 +152,8 @@ def convert_file(source: str, settings: Settings,
 
     report("Rendering %d notes" % len(notes), 0.45)
     render_options = settings.render_options()
-    pcm, _stems, duration = render(notes, channels, render_options, grouped)
+    pcm, stems, duration = render(notes, channels, render_options, grouped)
+    result.stems = stems
     report("Writing the WAV", 0.9)
     audio = wav_bytes(pcm, render_options)
 

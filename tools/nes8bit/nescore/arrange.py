@@ -161,14 +161,29 @@ def _velocity_to_level(velocity: int, role: str) -> int:
 
 
 def _duty_for(note: Note) -> float:
-    """Pulse width from the General MIDI instrument, falling back to the role."""
-    kind, duty = gm.timbre(note.program)
+    """Pulse width from the instrument *and* the register.
+
+    The duty cycle is the only tone control a pulse channel has, and every composer
+    of the era used it as one: a narrow pulse for a thin lead an octave up, a wide
+    one for body down low. Ignoring the register is what makes transcriptions sound
+    shrill on top and hollow underneath.
+    """
+    _kind, duty = gm.timbre(note.program)
     if note.role == "bass":
-        return 0.5
-    if note.role == "harmony" and note.program in (0, 48, 49, 88, 89, 90, 91):
-        return 0.125          # pads and string beds sit better thin
-    if note.role == "melody":
-        return duty if duty in (0.125, 0.25, 0.5) else 0.5
+        duty = 0.5
+    elif note.role == "harmony" and note.program in (0, 48, 49, 88, 89, 90, 91):
+        duty = 0.125          # pads and string beds sit better thin
+    elif note.role == "melody":
+        duty = duty if duty in (0.125, 0.25, 0.5) else 0.5
+    if duty not in (0.125, 0.25, 0.5):
+        duty = 0.5
+    # register: a 50 % pulse three octaves up is a siren, not a flute
+    if note.pitch >= 91 and duty > 0.125:
+        duty = 0.125
+    elif note.pitch >= 84 and duty > 0.25:
+        duty = 0.25
+    if note.pitch <= 40 and duty < 0.5:
+        duty = 0.5
     return duty
 
 

@@ -31,7 +31,7 @@ import wave
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from . import samples
+from . import gm, mix, samples
 from .arrange import KIND_GAIN
 from .chips import NOISE_PERIODS, channel_by_id
 from .model import Note
@@ -70,6 +70,10 @@ class RenderOptions:
     vibrato: bool = True
     sampled_drums: bool = True
     lowpass: bool = True
+    equalise: bool = True       # put every voice at its role's level
+    echo: bool = True           # the "second pulse" trick NES composers used
+    limit: bool = True          # tame the transients instead of the whole mix
+    compress: bool = False      # extra bus compression, off unless asked for
 
 
 def note_frequency(pitch: float) -> float:
@@ -78,34 +82,74 @@ def note_frequency(pitch: float) -> float:
 
 # --------------------------------------------------------------------- envelopes
 
-def _base_level(note: Note, progress: float) -> float:
-    """4-bit-ish volume over the life of a note, the way a console envelope moves."""
-    if note.volume <= 0:
-        return 0.0
-    progress = max(0.0, min(1.0, progress))
+# How each instrument family behaves over the life of a note. This is the single
+# biggest difference between "a square wave playing the right note" and "a clarinet":
+# a piano dies away, an organ holds flat, strings swell in, brass blats and settles.
+# (attack s, decay time constant s — 0 means hold, sustain floor, release scale,
+#  automatic vibrato in semitones)
+FAMILY_ENVELOPE = {
+    "piano": (0.002, 0.34, 0.0, 1.0, 0.0),
+    "chromatic": (0.002, 0.26, 0.0, 1.0, 0.0),
+    "organ": (0.012, 0.0, 0.92, 1.0, 0.0),
+    "guitar": (0.003, 0.40, 0.0, 1.0, 0.0),
+    "bass": (0.006, 0.0, 0.90, 1.0, 0.0),
+    "strings": (0.075, 0.0, 0.82, 1.7, 0.16),
+    "ensemble": (0.065, 0.0, 0.84, 1.6, 0.13),
+    "brass": (0.034, 0.0, 0.86, 1.3, 0.05),
+    "reed": (0.028, 0.0, 0.88, 1.3, 0.10),
+    "pipe": (0.024, 0.0, 0.90, 1.3, 0.12),
+    "lead": (0.006, 0.0, 0.92, 1.1, 0.10),
+    "pad": (0.120, 0.0, 0.86, 1.9, 0.11),
+    "fx": (0.050, 0.0, 0.75, 1.5, 0.10),
+    "ethnic": (0.004, 0.32, 0.0, 1.0, 0.0),
+    "percussive": (0.001, 0.20, 0.0, 1.0, 0.0),
+    "sfx": (0.010, 0.22, 0.55, 1.0, 0.0),
+}
+DRUM_ENVELOPE = (0.001, 0.16, 0.0, 0.8, 0.0)
+DEFAULT_ENVELOPE = (0.006, 0.0, 0.9, 1.2, 0.0)
+_SHAPES: Dict[int, tuple] = {}
+
+
+def envelope_shape(note: Note) -> tuple:
+    """The envelope a note's instrument would use, cached per program."""
     if note.role == "drum":
-        decay = (1.0 - progress) ** 0.7
-    elif note.role == "bass":
-        decay = 1.0 - 0.18 * progress
-    else:
-        decay = 1.0 - 0.28 * progress
-    level = int(round(note.volume * max(0.0, decay)))
-    return max(0, min(15, level)) / 15.0
+        return DRUM_ENVELOPE
+    program = int(note.program)
+    shape = _SHAPES.get(program)
+    if shape is None:
+        shape = FAMILY_ENVELOPE.get(gm.family(program), DEFAULT_ENVELOPE)
+        _SHAPES[program] = shape
+    return shape
 
 
 def _envelope(note: Note, elapsed: float) -> float:
-    """Level at a moment in time, with ramps so nothing clicks."""
+    """Level at a moment in time: the instrument's own shape, with soft ramps.
+
+    The volume register is 4-bit, so the level is quantised the way the hardware
+    would — but the *shape* comes from the MIDI instrument, not from a single
+    generic fade, which is why a pad now swells and a piano now dies away.
+    """
+    if note.volume <= 0:
+        return 0.0
     duration = max(note.dur, 1e-4)
     if elapsed < 0 or elapsed >= duration:
         return 0.0
-    base = _base_level(note, elapsed / duration)
-    # Short notes get proportionally shorter ramps: a 33 ms sixteenth cannot
-    # afford a 12 ms fade-out, or the tune turns into a row of blips.
-    attack_time = min(ATTACK, duration * 0.30)
-    release_time = min(RELEASE, duration * 0.35)
+    attack_time, decay_tau, sustain, release_scale, _vib = envelope_shape(note)
+
+    # what the volume register holds at this moment: a decay to the sustain floor
+    # for struck instruments, flat for held ones
+    held = 1.0
+    if decay_tau > 0.0 and elapsed > attack_time:
+        held = sustain + (1.0 - sustain) * \
+            math.exp(-(elapsed - attack_time) / decay_tau)
+    held = int(round(note.volume * held)) / 15.0        # 4-bit steps, like the APU
+
+    # a 33 ms sixteenth cannot afford a 75 ms swell
+    attack_time = min(attack_time, duration * 0.35)
     attack = min(1.0, elapsed / max(1e-4, attack_time))
+    release_time = min(RELEASE * release_scale, duration * 0.40)
     release = min(1.0, (duration - elapsed) / max(1e-4, release_time))
-    return base * math.sqrt(attack) * (release ** 0.45)
+    return held * (attack ** 0.6) * (release ** 0.45)
 
 
 def _slice(buf: List[float], start: int, end: int, level: float) -> None:
@@ -115,14 +159,26 @@ def _slice(buf: List[float], start: int, end: int, level: float) -> None:
         buf[start:end] = [level] * (end - start)
 
 
-def _vibrato(note: Note, seconds: float, enabled: bool) -> float:
+def _vibrato(note: Note, seconds: float, enabled: bool, ramp_time: float = 0.15) -> float:
     """Pitch multiplier for the note's vibrato depth, as a slow LFO."""
     if not enabled or note.vibrato <= 0:
         return 1.0
     depth = note.vibrato / 12.0
     # fade the wobble in, the way a singer or a synth LFO does
-    ramp = min(1.0, seconds / 0.15)
+    ramp = min(1.0, seconds / max(1e-4, ramp_time))
     return 1.0 + depth * ramp * math.sin(2.0 * math.pi * VIBRATO_HZ * seconds)
+
+
+def with_instrument_vibrato(note: Note, options: "RenderOptions") -> Note:
+    """Sustained instruments wobble slightly, the way a player's do."""
+    if not options.vibrato or note.vibrato > 0 or note.role == "drum":
+        return note
+    depth = envelope_shape(note)[4]
+    if depth <= 0 or note.dur < 0.32:
+        return note
+    copy = note.copy()
+    copy.vibrato = depth
+    return copy
 
 
 # ----------------------------------------------------------------- oscillators
@@ -186,7 +242,9 @@ def _emit_noise(buf, a: int, b: int, note: Note, rate: int, gain: float) -> None
     period = float(NOISE_PERIODS[index])
     samples_per_step = max(1.0, rate / (APU_CLOCK / period))
     short = note.noise_short
-    lfsr = 1
+    # every hit starts the shift register somewhere else, so repeated snares are
+    # not bit-identical (they were: 1, 2, 3, ... machine gun)
+    lfsr = (0x7F & int(_hit_variation(note) * 127.0)) | 1
     pos = float(a)
     while pos < b:
         for _ in range(int(max(1, min(MAX_RUN * 4, round(samples_per_step))))):
@@ -204,11 +262,23 @@ def _emit_noise(buf, a: int, b: int, note: Note, rate: int, gain: float) -> None
         pos = run_end
 
 
+def _hit_variation(note: Note) -> float:
+    """A repeatable 0..1 wobble per hit: a drummer never hits twice the same way.
+
+    Derived from the note's position, so a render is still byte-for-byte repeatable.
+    """
+    seed = int(round(note.start * 1000.0)) ^ (note.pitch * 2654435761)
+    seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return seed / 0x7FFFFFFF
+
+
 def _emit_sample(buf, a: int, b: int, note: Note, rate: int, gain: float) -> None:
     """Play a kit piece, resampled from the delta channel's rate."""
     piece = samples.get(samples.for_drum(note.drum or "snare", note.pitch))
     source_rate = samples.sample_rate()
-    step = source_rate / float(rate)
+    variation = _hit_variation(note)
+    gain = gain * (0.94 + 0.12 * variation)
+    step = (source_rate / float(rate)) * (1.0 + 0.025 * (variation - 0.5))
     length = min(b - a, int(len(piece) / step))
     position = 0.0
     for index in range(length):
@@ -234,6 +304,7 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
     vibrato = options.vibrato
 
     for note in notes:
+        note = with_instrument_vibrato(note, options)
         note_gain = gain * ROLE_GAIN.get(note.role, 0.7)
         a = int(round(note.start * rate))
         b = int(round(note.end() * rate))
@@ -317,19 +388,55 @@ def render(notes: List[Note], channels, options: RenderOptions,
         for note in notes:
             grouped.setdefault(note.channel, []).append(note)
 
-    master = [0.0] * total
     stems: Dict[str, List[float]] = {}
     for channel_id, channel_notes in grouped.items():
         try:
             spec = channel_by_id(channels, channel_id)
         except KeyError:
             continue
-        buf = render_channel(channel_notes, spec, options, total)
-        stems[channel_id] = buf
-        for index, value in enumerate(buf):
-            master[index] += value
+        stems[channel_id] = render_channel(channel_notes, spec, options, total)
+
+    # Every voice is measured, then nudged towards the level its role belongs at:
+    # this is what stops a harmony line from arriving 18 dB under the lead.
+    gains: Dict[str, float] = {}
+    if options.equalise:
+        gains = mix.balance(stems, mix.channel_roles(grouped))
+
+    master = [0.0] * total
+    for channel_id, buf in stems.items():
+        gain = gains.get(channel_id, 1.0)
+        if abs(gain - 1.0) < 1e-3:
+            for index, value in enumerate(buf):
+                master[index] += value
+        else:
+            for index, value in enumerate(buf):
+                master[index] += value * gain
 
     _polish(master, options.rate, options.lowpass)
+
+    # Give the effect chain a known level to work at, so its settings mean the
+    # same thing for a quiet tune and a loud one.
+    headroom = max((abs(value) for value in master), default=0.0)
+    if headroom > 0:
+        pre = 1.0 / headroom
+        master = [value * pre for value in master]
+
+    if options.echo:
+        mix.echo(master, options.rate, delay=mix.echo_delay(notes))
+    if options.compress:
+        mix.compress(master, options.rate)
+
+    # Peak-normalise, shave the transients that stick out, then normalise again:
+    # the drums keep their punch and the tune comes up about 3 dB instead of being
+    # turned down because one kick hit 14 dB over a square wave.
+    peak = max((abs(value) for value in master), default=0.0)
+    if peak > 0:
+        master = [value * (options.gain / peak) for value in master]
+    if options.limit:
+        mix.limit(master, options.rate, ceiling=0.72)
+        peak = max((abs(value) for value in master), default=0.0)
+        if peak > 0:
+            master = [value * (options.gain / peak) for value in master]
 
     peak = max((abs(value) for value in master), default=0.0)
     scale = (options.gain / peak) if peak > 0 else 1.0

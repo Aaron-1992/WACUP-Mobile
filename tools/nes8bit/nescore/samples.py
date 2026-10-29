@@ -56,8 +56,52 @@ def _normalise(signal: List[float], peak: float = 0.95) -> List[float]:
 
 
 def _quantise(signal: List[float]) -> List[float]:
-    """7-bit, like the delta channel's DAC — the source of the grit."""
-    return [round(v * (DMC_LEVELS / 2.0)) / (DMC_LEVELS / 2.0) for v in signal]
+    """7-bit, like the delta channel's DAC — but with error feedback.
+
+    Straight quantisation leaves a stair-step on every decay, which is what makes
+    cheap sampled drums buzz. Feeding the rounding error into the next sample moves
+    that error into noise the ear ignores, so the grit stays and the buzz does not.
+    """
+    scale = DMC_LEVELS / 2.0
+    error = 0.0
+    out = []
+    for value in signal:
+        wanted = value * scale + error
+        stepped = round(wanted)
+        error = wanted - stepped
+        out.append(stepped / scale)
+    return out
+
+
+def _soft_clip(signal: List[float], drive: float = 1.6) -> List[float]:
+    """A little saturation: a real drum hit is not a clean sine."""
+    return [math.tanh(value * drive) / math.tanh(drive) for value in signal]
+
+
+def _room(signal: List[float], rate: float = DMC_RATE) -> List[float]:
+    """Three early reflections, quiet: the kit sits in a room instead of a vacuum."""
+    taps = ((0.009, 0.20), (0.017, 0.13), (0.029, 0.08))
+    out = list(signal)
+    for delay, gain in taps:
+        offset = int(delay * rate)
+        if offset >= len(out):
+            continue
+        for index in range(offset, len(out)):
+            out[index] += signal[index - offset] * gain
+    return out
+
+
+def _metal(frequencies, seconds: float, rate: float = DMC_RATE) -> List[float]:
+    """The 808 trick: a handful of detuned squares through a high-pass."""
+    count = int(seconds * rate)
+    out = [0.0] * count
+    for frequency in frequencies:
+        step = 2.0 * math.pi * frequency / rate
+        for index in range(count):
+            out[index] += 1.0 if math.sin(step * index) >= 0.0 else -1.0
+    spread = max((abs(v) for v in out), default=1.0) or 1.0
+    out = [v / spread for v in out]
+    return _highpass(out, 3200.0, rate)
 
 
 def _render(seconds: float, rate: int = DMC_RATE):
@@ -67,65 +111,87 @@ def _render(seconds: float, rate: int = DMC_RATE):
 # ------------------------------------------------------------------- the kit
 
 def kick() -> List[float]:
-    count, rate = _render(0.22)
+    """Punch, not a beep: a fast pitch drop, a beater click and a short tail."""
+    count, rate = _render(0.30)
     out = []
     phase = 0.0
     for index in range(count):
         t = index / rate
-        # pitch drops from 150 Hz to 45 Hz in the first 60 ms
-        frequency = 45.0 + 105.0 * math.exp(-t / 0.030)
+        # 165 Hz down to 44 Hz in ~35 ms, the way a real kick's head tension falls
+        frequency = 44.0 + 121.0 * math.exp(-t / 0.032)
         phase += 2 * math.pi * frequency / rate
-        body = math.sin(phase) * math.exp(-t / 0.075)
-        click = math.exp(-t / 0.004) * 0.45
-        out.append(body + click)
-    return _quantise(_normalise(out))
+        body = math.sin(phase) * math.exp(-t / 0.090)
+        thump = math.sin(phase * 0.5) * math.exp(-t / 0.16) * 0.25
+        click = math.exp(-t / 0.0035) * 0.55 * (1.0 if index % 2 else -1.0)
+        out.append(body + thump + click)
+    out = _soft_clip(_normalise(out, 0.9), 1.35)
+    return _quantise(_normalise(_room(out), 0.96))
 
 
 def snare() -> List[float]:
-    count, rate = _render(0.24)
-    noise = _highpass(_noise(count, 11), 1400, rate)
+    """Two drum heads plus a wire rattle — the crack comes from the noise layer."""
+    count, rate = _render(0.30)
+    noise = _highpass(_noise(count, 11), 1600, rate)
+    rattle = _highpass(_noise(count, 13), 4200, rate)
     out = []
     for index in range(count):
         t = index / rate
-        tone = math.sin(2 * math.pi * 185.0 * t) * math.exp(-t / 0.030) * 0.55
-        rattle = noise[index] * math.exp(-t / 0.070) * 0.9
-        out.append(tone + rattle)
-    return _quantise(_normalise(out))
+        # heads at 185 and 278 Hz, both dropping slightly as the shell settles
+        drop = 1.0 - 0.10 * min(1.0, t / 0.05)
+        tone = (math.sin(2 * math.pi * 185.0 * drop * t) * 0.52
+                + math.sin(2 * math.pi * 278.0 * drop * t) * 0.30)
+        tone *= math.exp(-t / 0.045)
+        crack = noise[index] * math.exp(-t / 0.012) * 0.55
+        wires = rattle[index] * math.exp(-t / 0.075) * 0.55
+        out.append(tone + crack + wires)
+    out = _soft_clip(_normalise(out, 0.9), 1.2)
+    return _quantise(_normalise(_room(out), 0.97))
 
 
 def hat(open_hat: bool = False) -> List[float]:
-    length = 0.28 if open_hat else 0.055
+    """Metallic, not a burst of white noise: six inharmonic squares plus sizzle."""
+    length = 0.34 if open_hat else 0.075
     count, rate = _render(length)
-    noise = _highpass(_noise(count, 23 if open_hat else 17), 6000, rate)
-    decay = 0.16 if open_hat else 0.018
-    out = [noise[i] * math.exp(-(i / rate) / decay) for i in range(count)]
-    return _quantise(_normalise(out, 0.62))
+    metal = _metal((205.3, 304.4, 369.6, 522.7, 540.0, 800.0), length)
+    noise = _highpass(_noise(count, 23 if open_hat else 17), 7500, rate)
+    decay = 0.19 if open_hat else 0.026
+    out = []
+    for index in range(count):
+        t = index / rate
+        envelope = math.exp(-t / decay) * (1.0 - math.exp(-t / 0.0008))
+        out.append((metal[index] * 0.75 + noise[index] * 0.55) * envelope)
+    out = _highpass(out, 5200.0, rate)
+    return _quantise(_normalise(out, 0.6))
 
 
 def tom(frequency: float = 160.0) -> List[float]:
-    count, rate = _render(0.26)
+    count, rate = _render(0.34)
+    skin_noise = _highpass(_noise(count, int(frequency) + 7), 900, rate)
     out = []
     phase = 0.0
     for index in range(count):
         t = index / rate
-        current = frequency * (1.0 + 0.5 * math.exp(-t / 0.025))
+        current = frequency * (1.0 + 0.42 * math.exp(-t / 0.028))
         phase += 2 * math.pi * current / rate
-        body = math.sin(phase) * math.exp(-t / 0.085)
-        skin = math.exp(-t / 0.006) * 0.25
-        out.append(body + skin)
-    return _quantise(_normalise(out))
+        body = math.sin(phase) * math.exp(-t / 0.105)
+        overtone = math.sin(phase * 1.71) * math.exp(-t / 0.045) * 0.18
+        skin = skin_noise[index] * math.exp(-t / 0.008) * 0.30
+        out.append(body + overtone + skin)
+    out = _soft_clip(_normalise(out, 0.95), 1.15)
+    return _quantise(_normalise(_room(out), 0.96))
 
 
 def crash() -> List[float]:
-    count, rate = _render(0.9)
-    noise = _highpass(_noise(count, 41), 3500, rate)
+    count, rate = _render(1.0)
+    wash = _highpass(_noise(count, 41), 3000, rate)
+    metal = _metal((465.0, 697.0, 1046.0, 1568.0, 2093.0), 1.0)
     out = []
     for index in range(count):
         t = index / rate
-        envelope = math.exp(-t / 0.30) * (1.0 - math.exp(-t / 0.002))
-        shimmer = 0.25 * math.sin(2 * math.pi * 5200 * t) * math.exp(-t / 0.12)
-        out.append(noise[index] * envelope + shimmer)
-    return _quantise(_normalise(out, 0.7))
+        envelope = math.exp(-t / 0.34) * (1.0 - math.exp(-t / 0.0015))
+        bloom = math.exp(-t / 0.55) * 0.6 + 0.4
+        out.append((wash[index] * 0.55 + metal[index] * 0.45 * bloom) * envelope)
+    return _quantise(_normalise(out, 0.72))
 
 
 def clap() -> List[float]:
@@ -156,15 +222,18 @@ def rim() -> List[float]:
 
 
 def ride() -> List[float]:
-    count, rate = _render(0.7)
-    noise = _highpass(_noise(count, 53), 5000, rate)
+    count, rate = _render(0.8)
+    wash = _highpass(_noise(count, 53), 5200, rate)
+    metal = _metal((590.0, 883.0, 1324.0, 1985.0), 0.8)
     out = []
     for index in range(count):
         t = index / rate
         bell = (math.sin(2 * math.pi * 1180 * t) + 0.6 * math.sin(2 * math.pi * 1760 * t))
-        out.append(noise[index] * math.exp(-t / 0.22) * 0.5
-                   + bell * math.exp(-t / 0.18) * 0.35)
-    return _quantise(_normalise(out, 0.6))
+        ping = metal[index] * math.exp(-t / 0.09) * 0.8
+        out.append(wash[index] * math.exp(-t / 0.26) * 0.30
+                   + bell * math.exp(-t / 0.22) * 0.25
+                   + ping)
+    return _quantise(_normalise(out, 0.62))
 
 
 def tambourine() -> List[float]:
@@ -213,13 +282,43 @@ def conga() -> List[float]:
     return tom(220.0)
 
 
+# How loud each piece should sit in the kit, relative to the kick. Without this the
+# kick is 6 dB over the snare and a tom buries both: pieces are recorded separately,
+# so they have to be balanced like a kit, not like eight unrelated files.
+PIECE_LEVEL_DB = {
+    "kick": 0.0, "snare": -1.5, "clap": -3.0, "rim": -7.0,
+    "hat": -8.5, "openhat": -8.0, "tamb": -9.0, "shaker": -10.0,
+    "tom_low": -2.0, "tom_mid": -2.5, "tom_high": -3.0,
+    "bongo": -4.0, "conga": -4.0, "cowbell": -7.0, "claves": -7.5,
+    "crash": -5.0, "ride": -8.5,
+}
+KIT_REFERENCE_DB = -13.0        # RMS a piece at 0 dB aims for
+
+
+def _level_kit(kit: Dict[str, List[float]]) -> Dict[str, List[float]]:
+    """Trim every piece to its place in the kit, then keep it under full scale."""
+    out = {}
+    for name, buffer in kit.items():
+        rms = math.sqrt(sum(v * v for v in buffer) / max(1, len(buffer)))
+        wanted = 10.0 ** ((KIT_REFERENCE_DB + PIECE_LEVEL_DB.get(name, -6.0)) / 20.0)
+        gain = (wanted / rms) if rms > 0 else 1.0
+        scaled = [v * gain for v in buffer]
+        # peaks may poke past full scale: the master stage soft-clips them, and
+        # squashing a snare's transient here would take its punch away
+        top = max((abs(v) for v in scaled), default=0.0)
+        if top > 1.35:
+            scaled = [v * (1.35 / top) for v in scaled]
+        out[name] = scaled
+    return out
+
+
 KIT: Dict[str, List[float]] = {}
 
 
 def get(name: str) -> List[float]:
     """Lazily build and cache one kit piece."""
     if not KIT:
-        KIT.update({
+        KIT.update(_level_kit({
             "kick": kick(),
             "snare": snare(),
             "hat": hat(False),
@@ -237,7 +336,7 @@ def get(name: str) -> List[float]:
             "claves": claves(),
             "bongo": bongo(),
             "conga": conga(),
-        })
+        }))
     if not KIT:
         get("kick")          # build the kit
     return KIT.get(name) or KIT["snare"]
