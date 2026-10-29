@@ -26,6 +26,9 @@ chip8bit --list-extensions
 `chip8bit song.mid` writes `song [nes].wav` next to the input.
 `--extensions all` writes `song [nes+vrc6+mmc5+fds+n163+psg+dmc].wav`.
 
+On Windows you can also **drag a file onto `chip8bit.exe`** — the window stays
+open so you can read the result. Add `--extensions all` for the full console.
+
 ## The chips you can switch on
 
 | flag | adds | channels |

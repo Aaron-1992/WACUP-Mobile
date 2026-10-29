@@ -200,6 +200,9 @@ def main(argv=None) -> int:
 
     if not args.inputs:
         parser.print_help()
+        print("\nDrag a .mid, .vgm, .vgz or .gym file onto chip8bit.exe with")
+        print("--extensions all to convert it with every extension chip enabled.")
+        _pause()
         return 0
 
     extensions = _parse_extensions(args.extensions)
@@ -208,7 +211,7 @@ def main(argv=None) -> int:
     sources = []
     for item in args.inputs:
         if os.path.isdir(item):
-            for pattern in ("*.mid", "*.midi", "*.vgm", "*.vgz", "*.gym"):
+            for pattern in ("*.mid", "*.midi", "*.vgm", "*.vgz", "*.gym", "*.zip"):
                 sources.extend(sorted(glob.glob(os.path.join(item, pattern))))
         else:
             sources.append(item)
@@ -233,7 +236,17 @@ def main(argv=None) -> int:
             failures += 1
 
     print("\ndone: %d ok, %d failed" % (len(sources) - failures, failures))
+    _pause()
     return 0 if failures == 0 else 1
+
+
+def _pause() -> None:
+    """Keep the window open when the exe was double-clicked or given a dropped file."""
+    if getattr(sys, "frozen", False) and sys.stdin and sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            pass
 
 
 if __name__ == "__main__":
