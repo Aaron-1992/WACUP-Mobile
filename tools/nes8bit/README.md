@@ -21,6 +21,8 @@ re-composes them for the NES sound chip, then renders 8-bit audio.
 
 ## The window
 
+![the chip8bit window, FastTracker II look](docs/window-tracker.png)
+
 Double-click **`chip8bit.exe`**. Its own window opens (pygame/SDL — a normal desktop
 window, no browser anywhere):
 
@@ -56,6 +58,10 @@ a mock-up:
 
 The look button in the header cycles **FT2 (FastTracker II, the default) → Windows
 95 → Amiga Workbench**. The choice is remembered.
+
+| FT2 (default) | Windows 95 | Amiga Workbench |
+| --- | --- | --- |
+| ![FT2 look](docs/window-tracker.png) | ![Windows 95 look](docs/window-win95.png) | ![Amiga look](docs/window-amiga.png) |
 
 Files dropped **straight onto `chip8bit.exe`** open the window with them queued.
 Everything happens on your machine; nothing is uploaded and no port is opened.
