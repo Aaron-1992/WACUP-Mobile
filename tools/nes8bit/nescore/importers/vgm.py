@@ -9,7 +9,7 @@ real pitch and loudness — no approximation of the original tuning.
 import gzip
 import math
 import struct
-from typing import List, Optional
+from typing import List
 
 from ..model import Note, Song
 from . import register
@@ -199,7 +199,6 @@ class GenesisTracker:
         channel = self.psg_latch
         if channel == 3:
             return
-        period = self.psg_period[channel]
         if self.psg_att[channel] >= 15:
             return
         if self.psg_active[channel] is not None:
@@ -324,7 +323,6 @@ def read(path: str) -> Song:
         if command == 0x67:                          # data block
             if not need(6):
                 break
-            _type = data[pos]
             size = struct.unpack("<I", data[pos + 1:pos + 5])[0]
             pos += 6 + size
             continue

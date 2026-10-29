@@ -13,19 +13,30 @@ The rules are the ones an NES composer uses by hand:
   how NES soundtracks fake chords.
 """
 
-from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from . import analyze, gm
 from .chips import DRUM_MAP, MELODIC_KINDS, ChannelSpec
 from .model import Note, Song
 
 # Preferred channel kinds per musical role, best first.
+# Who gets a good channel first when the console is tight.
+_ROLE_PRIORITY = {"drum": 5.0, "melody": 4.0, "bass": 3.5, "counter": 2.5,
+                  "harmony": 1.5, "rhythm": 1.0}
+
+
+def _priority(role: str) -> float:
+    return _ROLE_PRIORITY.get(role, 1.0)
+
+
 ROLE_PREFERENCE = {
     "melody": ["pulse", "saw", "fds", "wavetable", "psg", "triangle"],
+    "counter": ["pulse", "saw", "wavetable", "fds", "psg", "triangle"],
     "harmony": ["pulse", "saw", "wavetable", "psg", "fds", "triangle"],
     "bass": ["triangle", "saw", "fds", "psg", "wavetable", "pulse"],
-    "drum": ["noise", "dmc"],
+    "rhythm": ["pulse", "psg", "wavetable", "saw", "triangle", "fds"],
+    "drum": ["dmc", "noise"],
 }
 
 # How loud each kind sits in the mix, so parts balance the way a real track does.
@@ -101,50 +112,17 @@ class _Cluster:
         self.end = max(self.end, note.end())
 
 
-def _role_for_part(notes: List[Note]) -> str:
-    """Guess a part's job from its register and chord role."""
-    if not notes:
-        return "harmony"
-    if notes[0].role == "drum":
-        return "drum"
-    pitches = sorted(n.pitch for n in notes)
-    median = pitches[len(pitches) // 2]
-    average = sum(pitches) / len(pitches)
-    # A part that lives low and moves slowly is the bass.
-    if average < 52:
-        return "bass"
-    if average > 72:
-        return "melody"
-    if median < 60:
-        return "harmony"
-    return "harmony"
+def classify(song: Song, analysis=None) -> Dict[int, str]:
+    """Ask the analyser what every line is doing, then stamp roles onto notes.
 
-
-def classify(song: Song) -> Dict[int, str]:
-    """Assign a role to every source part; drum tracks are detected upstream."""
+    This replaces the old "guess from the median pitch" rule: the analyser splits
+    polyphonic tracks into monophonic voices first, so a chord and a tune are no
+    longer the same thing.
+    """
+    analysis = analysis or analyze.analyse(song)
     roles: Dict[int, str] = {}
-    parts = song.parts()
-
-    # Mono tracks that sit highest are usually the lead, so pick the top one as melody.
-    melodic_parts = [(pid, notes) for pid, notes in parts.items()
-                     if notes and notes[0].role != "drum"]
-    melodic_parts.sort(key=lambda item: -max(n.pitch for n in item[1]))
-
-    for index, (pid, notes) in enumerate(melodic_parts):
-        if notes[0].role == "drum":
-            roles[pid] = "drum"
-            continue
-        guess = _role_for_part(notes)
-        if index == 0 and guess != "bass":
-            guess = "melody"
-        roles[pid] = guess
-
-    for pid, notes in parts.items():
-        if notes and notes[0].role == "drum":
-            roles[pid] = "drum"
-
-    for note in song.notes:
-        note.role = roles.get(note.part, "harmony")
+    for voice in analysis.voices:
+        roles.setdefault(voice.part, voice.role)
     return roles
 
 
@@ -163,15 +141,15 @@ def _velocity_to_level(velocity: int, role: str) -> int:
 
 
 def _duty_for(note: Note) -> float:
-    """Pick a pulse duty that suits the part (25% is the classic lead sound)."""
+    """Pulse width from the General MIDI instrument, falling back to the role."""
+    kind, duty = gm.timbre(note.program)
     if note.role == "bass":
         return 0.5
-    if note.role == "harmony":
-        return 0.25 if (note.pitch % 3) else 0.5
-    # melody: brighter as the program number suggests a lead instrument
-    if note.program in (80, 81, 82, 84, 85, 86, 87):
-        return 0.25          # synth leads and leads
-    return 0.5 if note.pitch < 72 else 0.25
+    if note.role == "harmony" and note.program in (0, 48, 49, 88, 89, 90, 91):
+        return 0.125          # pads and string beds sit better thin
+    if note.role == "melody":
+        return duty if duty in (0.125, 0.25, 0.5) else 0.5
+    return duty
 
 
 class _ChannelState:
@@ -195,9 +173,10 @@ class _ChannelState:
         return not self.conflicts(start, end)
 
 
-def arrange(song: Song, channels: List[ChannelSpec], options: Options):
+def arrange(song: Song, channels: List[ChannelSpec], options: Options,
+            analysis=None):
     """Place every note on a channel; returns (notes, stats)."""
-    classify(song)
+    classify(song, analysis)
     stats = Stats()
 
     by_kind: Dict[str, List[_ChannelState]] = {}
@@ -216,11 +195,13 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
     # Work on copies: one song object can be arranged several ways in a session
     # (bare NES, then every extension), and the caller's notes must stay untouched.
     source_notes = [note.copy() for note in song.notes]
+    _articulate(source_notes)
     if options.dedupe:
         source_notes = _dedupe(source_notes, stats)
     share_budget = int(len(source_notes) * max(0.0, options.share_budget))
 
-    for note in sorted(source_notes, key=lambda n: (n.start, -n.pitch)):
+    for note in sorted(source_notes, key=lambda n: (n.start, -_priority(n.role),
+                                                   -n.velocity, -n.pitch)):
         if note.dur < options.min_duration or note.velocity < options.quietest:
             stats.dropped += 1
             continue
@@ -235,7 +216,8 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
 
         drum = note.role == "drum"
         if drum:
-            note.drum = _drum_kind(note.pitch)
+            kind, sample = gm.percussion(note.pitch)
+            note.drum = sample if sample else _drum_kind(note.pitch)
             period, short = DRUM_MAP.get(note.pitch, (9, False))
             note.noise_period = period
             note.noise_short = short
@@ -282,8 +264,10 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
                 continue
 
         if chosen is None:
-            # Leaving a note out is usually better than mangling the part.
-            if note.role == "harmony":
+            # Leaving a note out is usually better than mangling the part. A
+            # percussion hit that lost its channel to a kick or a snare counts as
+            # deliberate thinning, not as a failure.
+            if note.role in ("harmony", "drum") or note.role == "counter":
                 stats.simplified += 1
             else:
                 stats.dropped += 1
@@ -291,6 +275,9 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
 
         note.channel = chosen.spec.id
         note.volume = _velocity_to_level(note.velocity, note.role)
+        if note.expression < 0.999:
+            # CC7/CC11 in the file: quiet passages stay quiet
+            note.volume = max(1, min(15, int(round(note.volume * (0.45 + 0.55 * note.expression)))))
         note.duty = _duty_for(note)
         if drum:
             note.volume = max(6, note.volume)
@@ -326,24 +313,72 @@ def _rank(note: Note) -> int:
     return _ROLE_RANK.get(note.role, 1)
 
 
-def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
-    kept: List[Note] = []
-    for note in sorted(notes, key=lambda n: (n.start, -_rank(n), -n.velocity)):
-        duplicate = None
-        for other in kept:
-            if other.pitch != note.pitch:
-                continue
-            if abs(other.start - note.start) > 0.04:
-                continue
-            overlap = min(other.end(), note.end()) - max(other.start, note.start)
-            if overlap > 0.5 * min(other.dur, note.dur):
-                duplicate = other
+def _articulate(notes: List[Note]) -> None:
+    """Shape note lengths from how the lines actually play.
+
+    A legato line (notes touching each other) must not be re-attacked on every
+    note, or the tune stutters; a staccato line should stay detached. This is the
+    difference between "the MIDI was read" and "the MIDI was understood".
+    """
+    by_voice: Dict[int, List[Note]] = {}
+    for note in notes:
+        by_voice.setdefault((note.voice, note.part), []).append(note)
+
+    for _key, line in by_voice.items():
+        line.sort(key=lambda n: n.start)
+        if len(line) < 3:
+            continue
+        gaps = []
+        for previous, current in zip(line, line[1:]):
+            if current.start >= previous.start:
+                gaps.append(current.start - previous.end())
+        if not gaps:
+            continue
+        mean_gap = sum(gaps) / len(gaps)
+        legato = sum(1 for gap in gaps if gap < 0.02) / len(gaps)
+        for index, note in enumerate(line):
+            if index + 1 >= len(line):
                 break
-        if duplicate is None:
-            kept.append(note)
-        else:
+            following = line[index + 1]
+            gap = following.start - note.end()
+            if note.pitch == following.pitch:
+                # a repeated note has to be re-attacked: that is a rhythm
+                note.dur = min(note.dur, max(0.05, following.start - note.start - 0.01))
+            elif legato > 0.5 and gap < 0.06:
+                # hold through the join, so the chip does not click back in
+                note.dur = max(note.dur, following.start - note.start + 0.004)
+            elif mean_gap > 0.12:
+                # detached playing: keep the gap, it is part of the phrasing
+                note.dur = note.dur * 0.85
+
+
+def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
+    """Fold unison doublings, keeping the line that matters.
+
+    Two parts on the same pitch at the same moment sound as one voice on a chip,
+    so one copy goes — and it is never the melody or the bass that goes, no matter
+    which one started a millisecond earlier.
+    """
+    buckets: Dict[tuple, List[Note]] = {}
+    for note in notes:
+        key = (note.pitch, int(round(note.start / 0.04)))
+        buckets.setdefault(key, []).append(note)
+
+    kept: List[Note] = []
+    for group in buckets.values():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        group.sort(key=lambda n: (-_rank(n), -n.velocity))
+        winner = group[0]
+        for other in group[1:]:
+            if abs(other.start - winner.start) > 0.04 and \
+                    min(other.end(), winner.end()) - max(other.start, winner.start) <= 0:
+                kept.append(other)          # not actually simultaneous
+                continue
             stats.deduped += 1
-            duplicate.velocity = max(duplicate.velocity, note.velocity)
+            winner.velocity = max(winner.velocity, other.velocity)
+        kept.append(winner)
     return kept
 
 
@@ -353,8 +388,8 @@ _DRUM_RANK = {"kick": 5, "clap": 4, "snare": 4, "tom": 3, "crash": 2, "hat": 1}
 def _steal_for_drum(note: Note, by_kind):
     """Take a percussion channel from a less important hit.
 
-    On real NES soundtracks the drummer does exactly this: the kick and snare
-    land, and the hats get out of the way.
+    On real NES soundtracks the drummer does exactly this: the kick and the snare
+    land, and the hi-hats get out of the way.
     """
     rank = _DRUM_RANK.get(note.drum, 3)
     best = None

@@ -13,7 +13,7 @@ both reported by the tool:
 """
 
 import struct
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from .model import Note
 from .render import note_frequency

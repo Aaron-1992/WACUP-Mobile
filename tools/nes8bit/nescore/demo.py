@@ -135,7 +135,9 @@ def build() -> bytes:
 
     header = b"MThd" + struct.pack(">IHHH", 6, 1, len(tracks), DIVISION)
     tempo = Track("tempo")
-    tempo.add(0, b"\xFF\x51\x03" + struct.pack(">I", 500000)[1:])
+    tempo.add(0, b"\xFF\x51\x03" + struct.pack(">I", 500000)[1:])   # 120 BPM
+    tempo.add(0, b"\xFF\x58\x04\x04\x02\x18\x08")               # 4/4
+    tempo.add(0, b"\xFF\x59\x02\x02\x00")                        # D major
     return header + tempo.serialize() + track_bytes
 
 

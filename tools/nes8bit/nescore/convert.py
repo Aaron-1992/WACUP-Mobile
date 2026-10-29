@@ -8,9 +8,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import chips, importers
+from . import analyze, chips, importers
 from .arrange import Options, Stats, arrange
-from .render import RenderOptions, render, wav_bytes, write_wav
+from .render import RenderOptions, render, wav_bytes
 from .vgmout import write_vgm
 
 
@@ -66,6 +66,8 @@ class Result:
     voices: int = 0
     channels: Dict[str, int] = field(default_factory=dict)
     stats: Optional[Stats] = None
+    analysis: Optional[object] = None
+    analysis_lines: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     source_format: str = ""
     source_notes: int = 0
@@ -115,9 +117,15 @@ def convert_file(source: str, settings: Settings,
         result.error = "; ".join(song.warnings) or "no notes found in this file"
         return result
 
-    report("Arranging for the chip", 0.25)
+    report("Reading the music", 0.15)
+    analysis = analyze.analyse(song)
+    result.analysis = analysis
+    result.analysis_lines = analysis.summary_lines()
+
+    report("Arranging for the chip", 0.3)
     channels = settings.channels()
-    notes, stats = arrange(song, channels, settings.arrange_options())
+    notes, stats = arrange(song, channels, settings.arrange_options(),
+                           analysis=analysis)
     if not notes:
         result.ok = False
         result.error = "nothing survived arrangement (is the file empty?)"

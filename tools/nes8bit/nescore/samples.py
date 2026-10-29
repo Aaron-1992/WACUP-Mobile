@@ -144,6 +144,75 @@ def clap() -> List[float]:
     return _quantise(_normalise(out, 0.8))
 
 
+def rim() -> List[float]:
+    count, rate = _render(0.05)
+    noise = _highpass(_noise(count, 91), 2000, rate)
+    out = []
+    for index in range(count):
+        t = index / rate
+        click = math.sin(2 * math.pi * 1750 * t) * math.exp(-t / 0.004)
+        out.append(click * 0.7 + noise[index] * math.exp(-t / 0.010) * 0.5)
+    return _quantise(_normalise(out, 0.7))
+
+
+def ride() -> List[float]:
+    count, rate = _render(0.7)
+    noise = _highpass(_noise(count, 53), 5000, rate)
+    out = []
+    for index in range(count):
+        t = index / rate
+        bell = (math.sin(2 * math.pi * 1180 * t) + 0.6 * math.sin(2 * math.pi * 1760 * t))
+        out.append(noise[index] * math.exp(-t / 0.22) * 0.5
+                   + bell * math.exp(-t / 0.18) * 0.35)
+    return _quantise(_normalise(out, 0.6))
+
+
+def tambourine() -> List[float]:
+    count, rate = _render(0.16)
+    noise = _highpass(_noise(count, 61), 7000, rate)
+    out = [noise[i] * math.exp(-(i / rate) / 0.045) for i in range(count)]
+    for index in range(0, count, 7):
+        out[index] *= 1.25
+    return _quantise(_normalise(out, 0.6))
+
+
+def shaker() -> List[float]:
+    count, rate = _render(0.09)
+    noise = _highpass(_noise(count, 67), 8000, rate)
+    out = []
+    for index in range(count):
+        t = index / rate
+        out.append(noise[index] * math.exp(-t / 0.025) * (1.0 - math.exp(-t / 0.004)))
+    return _quantise(_normalise(out, 0.45))
+
+
+def cowbell() -> List[float]:
+    count, rate = _render(0.22)
+    out = []
+    for index in range(count):
+        t = index / rate
+        tone = (math.sin(2 * math.pi * 540 * t) + 0.6 * math.sin(2 * math.pi * 800 * t))
+        out.append(tone * math.exp(-t / 0.06))
+    return _quantise(_normalise(out, 0.6))
+
+
+def claves() -> List[float]:
+    count, rate = _render(0.07)
+    out = []
+    for index in range(count):
+        t = index / rate
+        out.append(math.sin(2 * math.pi * 2350 * t) * math.exp(-t / 0.008))
+    return _quantise(_normalise(out, 0.65))
+
+
+def bongo() -> List[float]:
+    return tom(320.0)
+
+
+def conga() -> List[float]:
+    return tom(220.0)
+
+
 KIT: Dict[str, List[float]] = {}
 
 
@@ -160,8 +229,23 @@ def get(name: str) -> List[float]:
             "tom_high": tom(210.0),
             "crash": crash(),
             "clap": clap(),
+            "rim": rim(),
+            "ride": ride(),
+            "tamb": tambourine(),
+            "shaker": shaker(),
+            "cowbell": cowbell(),
+            "claves": claves(),
+            "bongo": bongo(),
+            "conga": conga(),
         })
-    return KIT.get(name, KIT["snare"])
+    if not KIT:
+        get("kick")          # build the kit
+    return KIT.get(name) or KIT["snare"]
+
+
+def has(name: str) -> bool:
+    get("kick") if not KIT else None
+    return name in KIT
 
 
 def for_drum(kind: str, pitch: int = 38) -> str:

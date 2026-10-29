@@ -51,7 +51,8 @@ jobs:
         working-directory: tools/nes8bit
         run: |
           mkdir -p release_assets
-          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav window.png release_assets/
+          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav release_assets/
+          cp window-win95.png window-amiga.png release_assets/
           ls -la release_assets
 
       - uses: actions/upload-artifact@v4
@@ -105,9 +106,9 @@ jobs:
           $gui = Start-Process -FilePath ".\dist\chip8bit.exe" `
             -ArgumentList "--selftest", "--screenshot", "window.png" -Wait -PassThru -NoNewWindow
           "window selftest exit: $($gui.ExitCode)"
-          if (Test-Path .\window.png) { Get-Item .\window.png | Format-Table Name, Length }
+          Get-ChildItem .\window-*.png | Format-Table Name, Length
           if ($gui.ExitCode -ne 0) { throw "chip8bit.exe --selftest exited $($gui.ExitCode)" }
-          if (-not (Test-Path .\window.png)) { throw "the window never drew a frame" }
+          if (-not (Test-Path .\window-win95.png)) { throw "the window never drew a frame" }
 
           # the console build still does the classic command line job
           $out = & ".\dist\chip8bit-cli.exe" --cli tests\genesis-style.mid --extensions all --stats 2>&1 | Out-String
@@ -140,7 +141,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release_assets
-          cp dist/chip8bit.exe dist/chip8bit-cli.exe window.png release_assets/
+          cp dist/chip8bit.exe dist/chip8bit-cli.exe release_assets/
           ls -la release_assets
 
       - uses: actions/upload-artifact@v4
@@ -202,13 +203,14 @@ jobs:
             voice when that genuinely sounds like a chord.
 
             `demo-*.wav` are the built-in test tune on the bare NES and on the console
-            with every extension chip enabled. `window.png` is a real screenshot of
-            the app.
+            with every extension chip enabled. `window-win95.png` and
+            `window-amiga.png` are real screenshots of the two looks — click the
+            title bar badge to switch between them.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe
             dist/*.wav
-            dist/window.png
+            dist/window-*.png
           prerelease: true
           make_latest: false
 
@@ -219,8 +221,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -e
-          for name in chip8bit.exe chip8bit-cli.exe window.png \
-                      demo-all-chips.wav demo-bare-nes.wav; do
+          for name in chip8bit.exe chip8bit-cli.exe window-win95.png \
+                      window-amiga.png demo-all-chips.wav demo-bare-nes.wav; do
             size=$(gh release view chip8bit-latest --json assets \
               --jq ".assets[] | select(.name==\"$name\") | .size")
             if [ -z "$size" ]; then

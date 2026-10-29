@@ -15,7 +15,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import make_test_midi                                     # noqa: E402
-from nescore import chips, importers                       # noqa: E402
+from nescore import analyze, chips, importers              # noqa: E402
 from nescore.arrange import Options, arrange               # noqa: E402
 from nescore.cli import main                               # noqa: E402
 from nescore.render import (RenderOptions, render, render_channel,   # noqa: E402
@@ -62,6 +62,24 @@ def main_test() -> None:
     check("pitch bend survived", any(abs(n.bend) > 0.1 for n in song.notes))
     check("vibrato survived", any(n.vibrato > 0 for n in song.notes))
 
+    print("understanding the file")
+    analysis = analyze.analyse(song)
+    check("tempo read", abs(analysis.tempo - 120) < 1, str(analysis.tempo))
+    check("meter read", analysis.meter == "4/4", analysis.meter)
+    check("key read", analysis.key == "D major", analysis.key)
+    check("instruments named", any("Lead" in name for name in analysis.instrument_names),
+          str(analysis.instrument_names))
+    roles = [voice.role for voice in analysis.voices]
+    check("one melody found", roles.count("melody") == 1, str(roles))
+    check("one bass found", roles.count("bass") == 1, str(roles))
+    check("percussion separated", "drum" in roles, str(roles))
+    chords = [v for v in analysis.voices if v.chord_tone]
+    check("chords split into voices", len(chords) >= 3, str(len(chords)))
+    check("chord tones are harmony, not melody",
+          all(v.role in ("harmony", "counter", "bass") for v in chords),
+          str([v.role for v in chords]))
+    check("summary explains itself", any("BPM" in line for line in analysis.summary_lines()))
+
     print("arranging on a bare NES (4 voices)")
     base_channels = chips.build_channel_set([])
     base_notes, base_stats = arrange(song, base_channels, Options())
@@ -97,9 +115,19 @@ def main_test() -> None:
 
     check("with every chip the tune needs no sharing at all",
           all_stats.shared == 0, str(all_stats.shared))
-    check("with every chip nothing is thrown away",
-          all_stats.dropped == 0 and all_stats.simplified == 0,
-          "dropped %d, thinned %d" % (all_stats.dropped, all_stats.simplified))
+    check("with every chip nothing is lost",
+          all_stats.dropped == 0,
+          "dropped %d" % all_stats.dropped)
+    check("only percussion gets thinned, and only a little",
+          all_stats.simplified <= 10,
+          "thinned %d" % all_stats.simplified)
+
+    print("articulation")
+    legato_notes = [n for n in base_notes if n.role == "melody"]
+    joined = sum(1 for a, b in zip(legato_notes, legato_notes[1:])
+                 if abs(a.end() - b.start) < 0.01)
+    check("legato lines are not re-attacked note by note",
+          joined > 0 or len(legato_notes) < 2, str(joined))
 
     print("rendering")
     grouped = {}

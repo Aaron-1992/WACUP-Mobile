@@ -17,6 +17,9 @@ class Note:
     program: int = 0        # MIDI program or FM algorithm, used for timbre hints
     vibrato: float = 0.0    # semitones of vibrato depth
     bend: float = 0.0       # semitone offset from pitch bend
+    expression: float = 1.0  # CC7 volume x CC11 expression, 0..1
+    track_name: str = ""    # the name in the MIDI file, if it had one
+    voice: int = -1         # monophonic line this note belongs to (see analyze)
 
     # filled in by the arranger
     channel: str = ""
@@ -41,6 +44,10 @@ class Song:
     title: str = ""
     source_format: str = ""
     source_path: str = ""
+    tempo: float = 0.0
+    meter: str = ""
+    key: str = ""
+    track_names: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     def add_warning(self, message: str) -> None:

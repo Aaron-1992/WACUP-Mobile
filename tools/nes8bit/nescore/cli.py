@@ -15,7 +15,7 @@ import os
 import sys
 import time
 
-from . import chips, importers
+from . import analyze, chips, importers
 from .arrange import Options, arrange
 from .render import RenderOptions, render, write_stems, write_wav
 from .vgmout import write_vgm
@@ -99,6 +99,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
         for note in song.notes:
             note.pitch = max(0, min(127, note.pitch + args.transpose))
 
+    analysis = analyze.analyse(song)
     options = Options(
         allow_sharing=not args.no_sharing,
         dedupe=not args.no_dedupe,
@@ -107,7 +108,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
         min_duration=args.min_note,
         quietest=args.quietest,
     )
-    notes, stats = arrange(song, channels, options)
+    notes, stats = arrange(song, channels, options, analysis=analysis)
 
     render_options = RenderOptions(
         rate=args.rate,
@@ -141,9 +142,10 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
     elapsed = time.time() - started
     print("  > %s" % target)
     if args.stats or args.verbose:
-        print("  source: %s, %d notes, %.1fs, tags %s"
-              % (song.source_format or "?", len(song.notes), song.duration,
-                 ", ".join(extensions) or "none"))
+        print("  what the file contains:")
+        for line in analysis.summary_lines():
+            print("    " + line)
+        print("  chips: %s" % (", ".join(extensions) or "plain NES"))
         for line in stats.as_lines():
             print(line)
         print("  rendered %.1fs of audio in %.2fs (%dx realtime)"

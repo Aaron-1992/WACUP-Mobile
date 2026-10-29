@@ -92,6 +92,36 @@ def _parse_track(body: bytes):
     return events
 
 
+_MAJOR = ["C", "G", "D", "A", "E", "B", "F#", "C#"]
+_MINOR = ["A", "E", "B", "F#", "C#", "G#", "D#", "A#"]
+
+
+def _key_name(sharps: int, minor: bool) -> str:
+    names = _MINOR if minor else _MAJOR
+    if -7 <= sharps <= 7:
+        index = sharps if sharps >= 0 else sharps + 7
+        table = names if sharps >= 0 else ["F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"]
+        try:
+            return "%s %s" % (table[index], "minor" if minor else "major")
+        except IndexError:
+            pass
+    return ""
+
+
+def _track_meta(events):
+    """Name, patch and the first tempo/meter information in one track."""
+    name = ""
+    for _tick, status, payload in events:
+        if status == 0xFF and payload:
+            kind = payload[0]
+            if kind == 0x03 and not name:                       # track name
+                try:
+                    name = bytes(payload[1:]).decode("latin-1").strip("\x00 ").strip()
+                except Exception:
+                    name = ""
+    return name
+
+
 def _tempo_map(tracks):
     changes = [(0, 500000)]
     for events in tracks:
@@ -152,6 +182,24 @@ def read(path: str) -> Song:
         song.add_warning("no MTrk chunks found; is this really a MIDI file?")
         return song
 
+    # tempo, meter and track names: the things a musician reads off the page
+    for events in tracks:
+        name = _track_meta(events)
+        song.track_names.append(name or "Track %d" % (len(song.track_names) + 1))
+        for _tick, status, payload in events:
+            if status != 0xFF or not payload:
+                continue
+            if payload[0] == 0x59 and len(payload) >= 3 and not song.key:
+                sharps = payload[1] - 256 if payload[1] > 127 else payload[1]
+                song.key = _key_name(sharps, payload[2] == 1)
+            if payload[0] == 0x58 and len(payload) >= 3 and not song.meter:
+                numerator, denominator = payload[1], 2 ** payload[2]
+                song.meter = "%d/%d" % (numerator, denominator)
+            if payload[0] == 0x51 and len(payload) >= 4 and not song.tempo:
+                micros = (payload[1] << 16) | (payload[2] << 8) | payload[3]
+                if micros:
+                    song.tempo = 60_000_000.0 / micros
+
     changes = _tempo_map(tracks)
     to_seconds = _tick_converter(changes, division)
 
@@ -159,6 +207,10 @@ def read(path: str) -> Song:
         programs: Dict[int, int] = {}
         bends: Dict[int, float] = {}
         vibrato: Dict[int, float] = {}
+        volume: Dict[int, float] = {channel: 1.0 for channel in range(16)}
+        expression: Dict[int, float] = {channel: 1.0 for channel in range(16)}
+        bend_range: Dict[int, float] = {channel: 2.0 for channel in range(16)}
+        rpn: Dict[int, tuple] = {}
         sounding: Dict[Tuple[int, int], dict] = {}
         finished: List[dict] = []
 
@@ -188,9 +240,18 @@ def read(path: str) -> Song:
                     for key, info in sounding.items():
                         if key[0] == channel:
                             info["vibrato"] = vibrato[channel]
+                elif controller == 7:
+                    volume[channel] = value / 127.0
+                elif controller == 11:
+                    expression[channel] = value / 127.0
+                elif controller in (100, 101):                      # RPN select
+                    rpn[channel] = (rpn.get(channel, (0, 0))[0], value) \
+                        if controller == 100 else (value, rpn.get(channel, (0, 0))[1])
+                elif controller == 6 and rpn.get(channel) == (0, 0):
+                    bend_range[channel] = float(value or 2)         # semitones
             elif kind == 0xE0 and len(payload) >= 2:
                 raw = (payload[1] << 7) | payload[0]
-                bends[channel] = ((raw - 8192) / 8192.0) * 2.0     # +/- 2 semitones
+                bends[channel] = ((raw - 8192) / 8192.0) * bend_range.get(channel, 2.0)
                 for key, info in sounding.items():
                     if key[0] == channel and abs(bends[channel]) > abs(info["bend"]):
                         info["bend"] = bends[channel]      # the peak, not the last value
@@ -210,6 +271,8 @@ def read(path: str) -> Song:
                         "bend": bends.get(channel, 0.0),
                         "vibrato": vibrato.get(channel, 0.0),
                         "drum": channel == 9,
+                        "expression": volume.get(channel, 1.0)
+                                      * expression.get(channel, 1.0),
                     }
             elif kind == 0x80 and len(payload) >= 2:
                 close((channel, payload[0]), seconds)
@@ -229,6 +292,9 @@ def read(path: str) -> Song:
                 program=info["program"],
                 vibrato=info["vibrato"],
                 bend=info["bend"],
+                expression=max(0.0, min(1.0, info.get("expression", 1.0))),
+                track_name=(song.track_names[track_index]
+                            if track_index < len(song.track_names) else ""),
             ))
 
     song.refresh_duration()

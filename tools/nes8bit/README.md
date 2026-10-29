@@ -3,7 +3,11 @@
 Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, or a `.zip` of them) and
 re-composes them for the NES sound chip, then renders 8-bit audio.
 
-* **its own window** — double-click and it opens; no browser, no server, no install;
+* **its own window, in 1995** — Windows 95 or Amiga Workbench looks, switchable from
+  the title bar; no browser, no server, no install;
+* **it reads the MIDI before it converts it** — tracks are split into monophonic
+  voices by voice leading, instruments and drum pieces are identified, tempo, meter
+  and key are read, and the result is shown in the window;
 * **sampled drums** — kick, snare, hats, toms and cymbals are real samples played
   through the console's delta channel, not noise bursts pretending to be drums;
 * **no click-and-fizz** — every note has an attack and a release, and the mix is
@@ -22,9 +26,13 @@ window, no browser anywhere):
    *Demo tune* loads something to play with immediately.
 2. **Pick chips** — click the extension chips. The header shows your voice count
    (4 → 22). Your choices are remembered between runs.
-3. **Convert** — press *Convert*. Each result gets a card: play it (or *Stop*),
-   *Save as…* anywhere you like, or *Open folder*. There is also a 16-bit and a
-   `.vgm` toggle, and *sampled drums* on/off.
+3. **Convert** — press *Convert*. Each result gets a card that first tells you what
+   the converter understood: `120 BPM · 4/4 · 169 notes · D major`, the instruments
+   (`Lead 2 (sawtooth), Synth Bass 1, Pad 2 (warm), Drums`), and how many voices it
+   placed, shared or thinned. Then play it, *Save as…* anywhere, or *Open folder*.
+
+Click the badge in the title bar to switch between the **Windows 95** and **Amiga
+Workbench** looks. The choice is remembered.
 
 Files dropped **straight onto `chip8bit.exe`** open the window with them queued.
 Everything happens on your machine; nothing is uploaded and no port is opened.
@@ -56,6 +64,29 @@ the noise channel, `--no-sharing` forbids arpeggios entirely.
 
 That is 4 voices bare and 22 with everything enabled.
 
+## What "understanding the MIDI" means here
+
+1. **Track names, tempo, time signature, key signature** are read from the file's
+   meta events, along with every instrument change (program), channel volume (CC7),
+   expression (CC11), sustain pedal, vibrato (CC1) and pitch-bend range (RPN 0).
+2. **Polyphonic tracks are split into monophonic voices by voice leading**: each new
+   note continues whichever free line is nearest in pitch. A five-note pad becomes
+   five voices; an eighth-note run stays one line. A chip channel is monophonic, so
+   this is the step that has to happen before anything can be "placed".
+3. **Each voice is named** — melody, counter-melody, bass, harmony, rhythm or
+   percussion — from its register, its movement, its note lengths, how much it moves
+   by step, and the General MIDI instrument it is played on. A high chord tone is
+   harmony, not automatically the tune.
+4. **Percussion is read as a drum kit**, piece by piece (kick, snare, rim, clap, hats,
+   ride, crash, three toms, tambourine, shaker, cowbell, claves, bongos, congas), not
+   as one anonymous noise channel.
+5. **Articulation follows the playing**: legato lines are held through the joins so
+   the chip does not re-attack every note, repeated notes keep their attack, and
+   detached lines stay detached.
+6. **Timbre follows the instrument**: pads get thin 12.5 % pulses, leads 25 %, bass
+   the triangle, and the file's own volume/expression controls keep quiet passages
+   quiet.
+
 ## How the placement rules work
 
 A chip channel plays **one note at a time**. Anything else is a lie that sounds
@@ -81,7 +112,7 @@ like one, so:
 
 | piece | what it does |
 | --- | --- |
-| drums | synthesised-from-scratch kit, quantised to the delta channel's 7-bit 33.1 kHz output — the grit is deliberate |
+| drums | a 17-piece kit (kick, snare, rim, clap, hats, ride, crash, toms, tambourine, shaker, cowbell, claves, bongos, congas) synthesised from scratch and quantised to the delta channel's 7-bit 33.1 kHz output — the grit is deliberate |
 | notes | 4 ms attack, musical decay, 12 ms release: no digital snaps |
 | pulses | 12.5/25/50/75 % duty, 4-bit volume, vibrato follows the MIDI CC1 |
 | triangle | the real 32-step staircase, no volume control (that is the point) |

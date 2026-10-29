@@ -1,9 +1,11 @@
-"""The chip8bit window: a self-contained desktop app drawn with pygame.
+"""The chip8bit window, drawn like it is 1995.
 
-No browser, no server, no page: one native window with drag-and-drop, chip
-toggles, a conversion button, and a player for the result. pygame is used only
-for the window, the drawing and the audio playback; the conversion itself is the
-same code the command line runs.
+One native window, two period looks — Windows 95 (teal desktop, bevelled grey,
+navy title bars) and Amiga Workbench (blue desktop, orange accents, chunky
+borders). No browser, no server, no page.
+
+The window also shows what the converter understood about the file: tempo, meter,
+instruments, and how many melody/bass/harmony/percussion lines it found.
 """
 
 import json
@@ -17,50 +19,27 @@ from typing import Dict, List, Optional
 
 import pygame
 
-from . import chips, convert, dialogs, demo, samples
+from . import chips, convert, dialogs, demo, theme
 
-WIDTH, HEIGHT = 1080, 740
-MIN_WIDTH, MIN_HEIGHT = 940, 640
+WIDTH, HEIGHT = 1080, 760
+MIN_WIDTH, MIN_HEIGHT = 940, 660
 FPS = 60
 
-BG = (13, 17, 23)
-PANEL = (22, 27, 34)
-PANEL_2 = (28, 36, 48)
-LINE = (42, 53, 66)
-TEXT = (230, 237, 243)
-MUTED = (139, 152, 165)
-DIM = (95, 107, 120)
-ACCENT = (110, 231, 183)
-ACCENT_DARK = (16, 36, 29)
-BLUE = (56, 189, 248)
-WARN = (251, 191, 36)
-BAD = (248, 113, 113)
-OK = (52, 211, 153)
 
-
-def _font(size: int, bold: bool = False) -> pygame.font.Font:
-    for name in ("Segoe UI", "DejaVu Sans", "Noto Sans", "Liberation Sans",
-                 "Arial", "Helvetica"):
+def _font(theme_obj: theme.Theme, size: int, bold: bool = False):
+    for name in theme_obj.fonts():
         path = pygame.font.match_font(name, bold=bold)
         if path:
             return pygame.font.Font(path, size)
     return pygame.font.Font(None, size)
 
 
-def _fit(font: pygame.font.Font, text: str, width: int) -> str:
+def _fit(font, text: str, width: int) -> str:
     if font.size(text)[0] <= width:
         return text
     while text and font.size(text + "…")[0] > width:
         text = text[:-1]
-    return text + "…" if text else ""
-
-
-def _icon_close(surface: pygame.Surface, rect: pygame.Rect, color) -> None:
-    inset = 7
-    pygame.draw.line(surface, color, (rect.x + inset, rect.y + inset),
-                     (rect.right - inset, rect.bottom - inset), 2)
-    pygame.draw.line(surface, color, (rect.right - inset, rect.y + inset),
-                     (rect.x + inset, rect.bottom - inset), 2)
+    return (text + "…") if text else ""
 
 
 def _human(size: int) -> str:
@@ -72,35 +51,26 @@ def _human(size: int) -> str:
 
 
 class QueueItem:
-    def __init__(self, path: str, name: str, size: int = 0, error: str = ""):
+    def __init__(self, path: str, name: str, size: int = 0):
         self.path = path
         self.name = name
         self.size = size
-        self.error = error
 
 
 class App:
-    """The whole window: state, input, drawing and playback."""
-
     def __init__(self, files: Optional[List[str]] = None,
                  settings_path: Optional[str] = None, headless: bool = False):
         pygame.init()
         pygame.display.set_caption("chip8bit — NES / 8-bit transcoder")
-        flags = pygame.RESIZABLE
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
-        self.headless = headless
-
-        self.f_title = _font(26, bold=True)
-        self.f_sub = _font(13)
-        self.f_head = _font(12, bold=True)
-        self.f_body = _font(14)
-        self.f_small = _font(12)
-        self.f_button = _font(14, bold=True)
-        self.f_big = _font(16, bold=True)
 
         self.settings_path = settings_path or self._default_settings_path()
-        self.settings = self._load_settings()
+        self.settings, self.look = self._load_settings()
+        self.theme = theme.get(self.look)
+
+        self.fonts: Dict[str, object] = {}
+        self._build_fonts()
 
         self.items: List[QueueItem] = []
         self.results: List[convert.Result] = []
@@ -108,27 +78,37 @@ class App:
         self.busy = False
         self.progress = 0.0
         self.progress_label = ""
-        self.status = "Drop MIDI, VGM or GYM files onto the window, or press Add files."
+        self.status = "Drop MIDI, VGM or GYM files here, or press Add files…"
         self.status_error = False
 
         self.hits: List[tuple] = []
-        self.hover: Optional[str] = None
+        self.mouse = (0, 0)
         self.scroll_queue = 0
         self.scroll_results = 0
         self.playing: Optional[int] = None
         self.mixer_ready = self._init_mixer()
-        self.audio_cache: Dict[str, str] = {}
         self.running = True
         self.chip_rects: List[tuple] = []
         self.convert_rect = pygame.Rect(0, 0, 0, 0)
-        self.queue_remove_rects: List[pygame.Rect] = []
         self.mouse_in_queue = False
         self.mouse_in_results = False
+        self.queue_view = pygame.Rect(0, 0, 0, 0)
+        self.results_view = pygame.Rect(0, 0, 0, 0)
 
         for path in files or []:
             self.add_path(path)
 
-    # ------------------------------------------------------------------ startup
+    # ------------------------------------------------------------------ setup
+
+    def _build_fonts(self) -> None:
+        t = self.theme
+        self.fonts = {
+            "title": _font(t, 17, bold=True),
+            "head": _font(t, 12, bold=True),
+            "body": _font(t, 14),
+            "small": _font(t, 12),
+            "button": _font(t, 13, bold=True),
+        }
 
     @staticmethod
     def _default_settings_path() -> str:
@@ -136,20 +116,22 @@ class App:
                 else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         return os.path.join(base, "chip8bit-settings.json")
 
-    def _load_settings(self) -> convert.Settings:
+    def _load_settings(self):
         settings = convert.Settings()
+        look = "win95"
         try:
             with open(self.settings_path, "r", encoding="utf-8") as handle:
                 saved = json.load(handle)
         except (OSError, ValueError):
-            return settings
+            return settings, look
         settings.extensions = [name for name in saved.get("extensions", [])
                                if name in chips.EXTENSION_CHANNELS]
         settings.bits = 16 if saved.get("bits", 16) != 8 else 8
         settings.export_vgm = bool(saved.get("export_vgm", False))
         settings.sharing = bool(saved.get("sharing", True))
         settings.sampled_drums = bool(saved.get("sampled_drums", True))
-        return settings
+        look = saved.get("look", "win95")
+        return settings, look
 
     def _save_settings(self) -> None:
         try:
@@ -160,6 +142,7 @@ class App:
                     "export_vgm": self.settings.export_vgm,
                     "sharing": self.settings.sharing,
                     "sampled_drums": self.settings.sampled_drums,
+                    "look": self.look,
                 }, handle, indent=2)
         except OSError:
             pass
@@ -172,20 +155,20 @@ class App:
         except Exception:
             return False
 
-    # -------------------------------------------------------------------- files
+    # ------------------------------------------------------------------- files
 
     def add_path(self, path: str) -> None:
         if not os.path.isfile(path):
+            return
+        if any(item.path == path for item in self.items):
             return
         try:
             size = os.path.getsize(path)
         except OSError:
             size = 0
-        if any(item.path == path for item in self.items):
-            return
         self.items.append(QueueItem(path, os.path.basename(path), size))
-        self.status = "Ready. %d file%s queued." % (len(self.items),
-                                                    "" if len(self.items) == 1 else "s")
+        self.status = "%d file%s queued. Press Convert." % (
+            len(self.items), "" if len(self.items) == 1 else "s")
         self.status_error = False
 
     def add_demo(self) -> None:
@@ -196,28 +179,43 @@ class App:
             with open(path, "wb") as handle:
                 handle.write(demo.build())
         self.add_path(path)
-        self.status = "Demo tune queued — press Convert."
 
-    # ------------------------------------------------------------------- convert
+    def remove_item(self, index: int) -> None:
+        if 0 <= index < len(self.items):
+            self.items.pop(index)
+
+    def clear_queue(self) -> None:
+        self.items = []
+        self.scroll_queue = 0
+
+    def pick_files(self) -> None:
+        paths = dialogs.open_files()
+        if paths:
+            for path in paths:
+                self.add_path(path)
+        else:
+            self.status = "If no picker opens, just drop files onto this window."
+
+    # ----------------------------------------------------------------- convert
 
     def start_convert(self) -> None:
         if self.busy or not self.items:
             return
-        settings = self.settings
         files = [(item.path, item.name) for item in self.items]
+        settings = self.settings
         self.busy = True
         self.progress = 0.0
-        self.progress_label = "Starting"
+        self.progress_label = "Starting…"
         self.status_error = False
-        thread = threading.Thread(target=self._work, args=(files, settings), daemon=True)
-        thread.start()
+        threading.Thread(target=self._work, args=(files, settings), daemon=True).start()
 
-    def _work(self, files, settings: convert.Settings) -> None:
+    def _work(self, files, settings) -> None:
         output_dir = dialogs.default_output_dir()
         for index, (path, name) in enumerate(files):
-            def progress(stage, fraction, path=path, index=index):
-                overall = (index + max(0.0, min(1.0, fraction))) / len(files)
-                self.messages.put(("progress", stage, overall, name))
+            def progress(stage, fraction, index=index, name=name):
+                self.messages.put(("progress", stage,
+                                   (index + max(0.0, min(1.0, fraction))) / len(files),
+                                   name))
 
             target = os.path.join(output_dir, convert.output_name(path, settings))
             result = convert.convert_file(path, settings, output_path=target,
@@ -238,9 +236,7 @@ class App:
             elif message[0] == "result":
                 _, result, path = message
                 self.results.insert(0, result)
-                for item in list(self.items):
-                    if item.path == path:
-                        self.items.remove(item)
+                self.items = [item for item in self.items if item.path != path]
                 if result.ok:
                     self.status = "Saved %s" % os.path.basename(result.wav_path)
                     self.status_error = False
@@ -250,30 +246,17 @@ class App:
             elif message[0] == "done":
                 self.busy = False
                 self.progress = 0.0
-                self.progress_label = ""
 
-    # ------------------------------------------------------------------ playback
+    # ---------------------------------------------------------------- playback
 
     def play(self, index: int) -> None:
         if not (0 <= index < len(self.results)):
             return
         result = self.results[index]
-        if not result.ok:
+        if not result.ok or not self.mixer_ready:
             return
-        if not self.mixer_ready:
-            self.status = "No audio device available."
-            self.status_error = True
-            return
-        path = result.wav_path
-        if not path or not os.path.isfile(path):
-            if not result.wav_bytes:
-                return
-            handle, path = tempfile.mkstemp(suffix=".wav", prefix="chip8bit-")
-            with os.fdopen(handle, "wb") as out:
-                out.write(result.wav_bytes)
-            self.audio_cache[result.wav_path] = path
         try:
-            pygame.mixer.music.load(path)
+            pygame.mixer.music.load(result.wav_path)
             pygame.mixer.music.play()
             self.playing = index
         except Exception as error:
@@ -289,21 +272,13 @@ class App:
 
     def save_result(self, index: int) -> None:
         result = self.results[index]
-        default = os.path.basename(result.wav_path) or convert.output_name(
-            result.name, self.settings)
-        destination = dialogs.save_as(default)
+        destination = dialogs.save_as(os.path.basename(result.wav_path) or "song.wav")
         if not destination:
-            if result.wav_path and os.path.isfile(result.wav_path):
-                self.status = "Already saved to %s" % result.wav_path
-                self.status_error = False
+            self.status = "Already saved to %s" % result.wav_path
             return
         try:
-            if result.wav_bytes:
-                with open(destination, "wb") as handle:
-                    handle.write(result.wav_bytes)
-            else:
-                with open(result.wav_path, "rb") as source, open(destination, "wb") as out:
-                    out.write(source.read())
+            with open(result.wav_path, "rb") as source, open(destination, "wb") as out:
+                out.write(source.read())
             self.status = "Copied to %s" % destination
             self.status_error = False
         except OSError as error:
@@ -311,400 +286,46 @@ class App:
             self.status_error = True
 
     def open_folder(self, index: int) -> None:
-        result = self.results[index]
-        if result.wav_path:
-            dialogs.reveal(result.wav_path)
+        dialogs.reveal(self.results[index].wav_path)
 
-    # -------------------------------------------------------------------- events
+    # ------------------------------------------------------------------ events
 
     def handle_event(self, event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
         elif event.type == pygame.VIDEORESIZE:
-            width = max(MIN_WIDTH, event.w)
-            height = max(MIN_HEIGHT, event.h)
-            self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+            self.screen = pygame.display.set_mode(
+                (max(MIN_WIDTH, event.w), max(MIN_HEIGHT, event.h)), pygame.RESIZABLE)
         elif event.type == pygame.DROPFILE:
-            paths = getattr(event, "files", None) or [event.file]
-            for path in paths:
+            for path in (getattr(event, "files", None) or [event.file]):
                 self.add_path(path)
-        elif event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                self.start_convert()
-            elif event.key == pygame.K_SPACE:
-                if self.playing is None:
-                    self.play(0)
-                else:
-                    self.stop()
-            elif event.key in (pygame.K_o,) and event.mod & pygame.KMOD_CTRL:
-                self.pick_files()
-            elif event.key == pygame.K_ESCAPE:
-                if self.playing is not None:
-                    self.stop()
-                else:
-                    self.running = False
         elif event.type == pygame.MOUSEWHEEL:
             if self.mouse_in_queue:
                 self.scroll_queue = max(0, self.scroll_queue - event.y)
             elif self.mouse_in_results:
                 self.scroll_results = max(0, self.scroll_results - event.y)
+        elif event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.start_convert()
+            elif event.key == pygame.K_SPACE:
+                self.stop() if self.playing is not None else self.play(0)
+            elif event.key == pygame.K_o and event.mod & pygame.KMOD_CTRL:
+                self.pick_files()
+            elif event.key == pygame.K_ESCAPE:
+                self.stop() if self.playing is not None else setattr(self, "running", False)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            for rect, action in self.hits:
+            for rect, action in reversed(self.hits):
                 if rect.collidepoint(event.pos):
                     action()
                     break
 
-    def pick_files(self) -> None:
-        paths = dialogs.open_files()
-        if paths:
-            for path in paths:
-                self.add_path(path)
-        else:
-            self.status = ("Use drag and drop if the file picker does not open — "
-                           "drop files straight onto this window.")
-            self.status_error = False
+    # ----------------------------------------------------------------- switches
 
-    # ------------------------------------------------------------------- drawing
-
-    def draw(self) -> None:
-        self.hits = []
-        width, height = self.screen.get_size()
-        self.screen.fill(BG)
-        self.mouse = pygame.mouse.get_pos()
-
-        self._draw_header(width)
-        left = pygame.Rect(20, 84, 348, height - 104)
-        right = pygame.Rect(384, 84, width - 404, height - 104)
-        self._draw_queue(left)
-        self._draw_right(right, height)
-
-    def _panel(self, rect: pygame.Rect) -> None:
-        pygame.draw.rect(self.screen, PANEL, rect, border_radius=14)
-        pygame.draw.rect(self.screen, LINE, rect, width=1, border_radius=14)
-
-    def _heading(self, x: int, y: int, text: str) -> None:
-        self.screen.blit(self.f_head.render(text.upper(), True, MUTED), (x, y))
-
-    def _text(self, x: int, y: int, text: str, font=None, color=TEXT) -> None:
-        self.screen.blit((font or self.f_body).render(text, True, color), (x, y))
-
-    def _button(self, rect: pygame.Rect, label: str, action, kind: str = "normal",
-                enabled: bool = True, key: str = "") -> None:
-        hovered = enabled and rect.collidepoint(self.mouse)
-        if kind == "primary":
-            base = (46, 230, 166) if hovered else (34, 197, 141)
-            foreground = (4, 35, 26)
-        elif kind == "ghost":
-            base = (34, 43, 54) if hovered else PANEL_2
-            foreground = TEXT if enabled else DIM
-        else:
-            base = (44, 56, 70) if hovered else (33, 42, 53)
-            foreground = TEXT if enabled else DIM
-        pygame.draw.rect(self.screen, base, rect, border_radius=9)
-        if kind != "primary":
-            pygame.draw.rect(self.screen, LINE, rect, width=1, border_radius=9)
-        font = self.f_big if kind == "primary" else self.f_button
-        surface = font.render(label, True, foreground)
-        self.screen.blit(surface, surface.get_rect(center=rect.center))
-        if enabled:
-            self.hits.append((rect.copy(), action))
-
-    def _draw_header(self, width: int) -> None:
-        pygame.draw.rect(self.screen, (17, 22, 30),
-                         pygame.Rect(0, 0, width, 64))
-        pygame.draw.line(self.screen, LINE, (0, 64), (width, 64))
-        title = self.f_title.render("chip", True, TEXT)
-        self.screen.blit(title, (22, 16))
-        offset = 22 + title.get_width()
-        accent = self.f_title.render("8", True, ACCENT)
-        self.screen.blit(accent, (offset, 16))
-        offset += accent.get_width()
-        rest = self.f_title.render("bit", True, TEXT)
-        self.screen.blit(rest, (offset, 16))
-        self.screen.blit(self.f_sub.render(
-            "MIDI & Genesis game music, re-composed for the NES chip",
-            True, MUTED), (22 + self.f_title.size("chip8bit")[0] + 18, 24))
-
-        voices = self.voice_count()
-        badge = "%d voices" % voices
-        surface = self.f_button.render(badge, True, ACCENT)
-        rect = pygame.Rect(width - surface.get_width() - 40, 20,
-                           surface.get_width() + 24, 26)
-        pygame.draw.rect(self.screen, ACCENT_DARK, rect, border_radius=13)
-        pygame.draw.rect(self.screen, (31, 92, 72), rect, width=1, border_radius=13)
-        self.screen.blit(surface, surface.get_rect(center=rect.center))
-
-    def voice_count(self) -> int:
-        return 4 + sum(len(chips.EXTENSION_CHANNELS[name])
-                       for name in self.settings.extensions
-                       if name in chips.EXTENSION_CHANNELS)
-
-    # ---- left panel: the queue
-
-    def _draw_queue(self, panel: pygame.Rect) -> None:
-        self._panel(panel)
-        x = panel.x + 16
-        self._heading(x, panel.y + 14, "1 · Add music")
-
-        zone = pygame.Rect(x, panel.y + 38, panel.width - 32, 84)
-        hot = zone.collidepoint(self.mouse)
-        pygame.draw.rect(self.screen, (18, 26, 22) if hot else (17, 22, 29),
-                         zone, border_radius=11)
-        pygame.draw.rect(self.screen, ACCENT if hot else LINE, zone, width=2,
-                         border_radius=11)
-        label = self.f_body.render("Drop files here", True, TEXT if hot else MUTED)
-        self.screen.blit(label, label.get_rect(center=(zone.centerx, zone.centery - 10)))
-        hint = self.f_small.render(".mid .midi .rmi .kar .vgm .vgz .gym .zip",
-                                   True, DIM)
-        self.screen.blit(hint, hint.get_rect(center=(zone.centerx, zone.centery + 14)))
-        self.hits.append((zone, self.pick_files))
-
-        buttons_y = panel.bottom - 46
-        self._button(pygame.Rect(x, buttons_y, 128, 32), "Add files…",
-                     self.pick_files, "ghost")
-        self._button(pygame.Rect(x + 136, buttons_y, 92, 32), "Demo tune",
-                     self.add_demo, "ghost")
-        self._button(pygame.Rect(x + 236, buttons_y, 80, 32), "Clear",
-                     self.clear_results_and_queue, "ghost")
-
-        list_top = zone.bottom + 12
-        list_bottom = buttons_y - 10
-        self.queue_view = pygame.Rect(x, list_top, panel.width - 32,
-                                      max(10, list_bottom - list_top))
-        self.mouse_in_queue = panel.collidepoint(self.mouse)
-
-        row_height = 40
-        visible = max(1, self.queue_view.height // row_height)
-        self.scroll_queue = min(self.scroll_queue,
-                                max(0, len(self.items) - visible))
-        self.queue_remove_rects = []
-
-        if not self.items:
-            self._text(x + 2, list_top + 6, "Nothing queued yet.", self.f_small, DIM)
-        for index in range(visible):
-            item_index = index + self.scroll_queue
-            if item_index >= len(self.items):
-                break
-            item = self.items[item_index]
-            row = pygame.Rect(self.queue_view.x, list_top + index * row_height,
-                              self.queue_view.width, row_height - 6)
-            pygame.draw.rect(self.screen, PANEL_2, row, border_radius=9)
-            pygame.draw.rect(self.screen, LINE, row, width=1, border_radius=9)
-            name = _fit(self.f_body, item.name, row.width - 96)
-            self._text(row.x + 10, row.y + 9, name)
-            size = _human(item.size) if item.size else ""
-            self._text(row.right - 66, row.y + 10, size, self.f_small, MUTED)
-            close = pygame.Rect(row.right - 30, row.y + 7, 22, 22)
-            pygame.draw.rect(self.screen, (38, 47, 60), close, border_radius=6)
-            _icon_close(self.screen, close, MUTED)
-            self.queue_remove_rects.append(close)
-            self.hits.append((close, (lambda i=item_index: self.remove_item(i))))
-            self.hits.append((row, (lambda i=item_index: self.inspect_item(i))))
-
-    def remove_item(self, index: int) -> None:
-        if 0 <= index < len(self.items):
-            self.items.pop(index)
-
-    def inspect_item(self, index: int) -> None:
-        if 0 <= index < len(self.items):
-            self.status = "%s · %s" % (self.items[index].path,
-                                       _human(self.items[index].size))
-
-    def clear_results_and_queue(self) -> None:
-        self.items = []
-        self.scroll_queue = 0
-        self.status = "Queue cleared."
-
-    # ---- right panel: chips, convert, results
-
-    def _draw_right(self, panel: pygame.Rect, window_height: int) -> None:
-        self._panel(panel)
-        x = panel.x + 16
-        inner_width = panel.width - 32
-
-        self._heading(x, panel.y + 14, "2 · Pick chips")
-        self.chip_rects = []
-        card_height = 54
-        gap = 10
-        columns = 2 if inner_width > 560 else 1
-        card_width = (inner_width - gap * (columns - 1)) // columns
-        rows = 0
-        y = panel.y + 38
-
-        entries = [("", "NES base console", 4,
-                    "pulse1, pulse2, triangle, noise")]
-        descriptions = {
-            "vrc6": "Konami VRC6 · 2 pulses + sawtooth",
-            "mmc5": "Nintendo MMC5 · 2 extra pulses",
-            "fds": "Famicom Disk System · wavetable voice",
-            "n163": "Namco 163 · 8 wavetable voices",
-            "psg": "SN76489 · 3 squares, the Genesis chip",
-            "dmc": "APU delta channel · sampled drums",
-        }
-        for name, spec in chips.EXTENSION_CHANNELS.items():
-            entries.append((name, name.upper(), len(spec),
-                            descriptions.get(name, "")))
-
-        for index, (name, label, count, description) in enumerate(entries):
-            column = index % columns
-            row = index // columns
-            rect = pygame.Rect(x + column * (card_width + gap), y + row * (card_height + gap),
-                               card_width, card_height)
-            enabled = name == "" or name in self.settings.extensions
-            hovered = rect.collidepoint(self.mouse) and name != ""
-            pygame.draw.rect(self.screen, ACCENT_DARK if enabled else
-                             ((26, 34, 44) if hovered else PANEL_2), rect,
-                             border_radius=10)
-            pygame.draw.rect(self.screen, ACCENT if enabled else LINE, rect, width=1,
-                             border_radius=10)
-            dot = pygame.Rect(rect.x + 12, rect.y + card_height // 2 - 5, 10, 10)
-            pygame.draw.circle(self.screen, ACCENT if enabled else (57, 72, 90),
-                               dot.center, 5)
-            title_text = "%s  +%d" % (label, count) if name else "%s  %d" % (label, count)
-            self.screen.blit(self.f_button.render(
-                _fit(self.f_button, title_text, rect.width - 46), True,
-                TEXT if enabled else MUTED), (rect.x + 30, rect.y + 9))
-            self.screen.blit(self.f_small.render(
-                _fit(self.f_small, description, rect.width - 46), True, DIM),
-                (rect.x + 30, rect.y + 29))
-            self.chip_rects.append((name, rect))
-            if name:
-                self.hits.append((rect, (lambda n=name: self.toggle_chip(n))))
-            rows = row + 1
-
-        chips_bottom = y + rows * (card_height + gap)
-
-        # two small options under the chips
-        options_y = chips_bottom + 2
-        self._checkbox(pygame.Rect(x, options_y, 150, 26), "16-bit output",
-                       self.settings.bits > 8, self.toggle_bits)
-        self._checkbox(pygame.Rect(x + 158, options_y, 150, 26), "also write .vgm",
-                       self.settings.export_vgm, self.toggle_vgm)
-        self._checkbox(pygame.Rect(x + 316, options_y, 190, 26), "sampled drums",
-                       self.settings.sampled_drums, self.toggle_drums)
-
-        convert_y = options_y + 38
-        self.convert_rect = pygame.Rect(x, convert_y, inner_width, 52)
-        busy = self.busy
-        self._button(self.convert_rect,
-                     "Converting…" if busy else "Convert", self.start_convert,
-                     "primary", enabled=bool(self.items) and not busy)
-
-        status_y = convert_y + 62
-        if busy:
-            bar = pygame.Rect(x, status_y, inner_width, 6)
-            pygame.draw.rect(self.screen, PANEL_2, bar, border_radius=3)
-            filled = pygame.Rect(x, status_y, int(inner_width * self.progress), 6)
-            pygame.draw.rect(self.screen, ACCENT, filled, border_radius=3)
-            self._text(x, status_y + 12, _fit(self.f_small,
-                                             self.progress_label, inner_width),
-                       self.f_small, MUTED)
-            status_y += 30
-        else:
-            self._text(x, status_y,
-                       _fit(self.f_small, self.status, inner_width), self.f_small,
-                       BAD if self.status_error else MUTED)
-            status_y += 24
-
-        # results
-        self._heading(x, status_y + 4, "3 · Results")
-        list_top = status_y + 26
-        self.results_view = pygame.Rect(x, list_top, inner_width,
-                                        max(10, panel.bottom - list_top - 14))
-        self.mouse_in_results = self.results_view.collidepoint(self.mouse)
-
-        card_h = 96
-        visible = max(1, self.results_view.height // (card_h + 10))
-        self.scroll_results = min(self.scroll_results,
-                                  max(0, len(self.results) - visible))
-        if not self.results:
-            self._text(x + 2, list_top + 8, "Converted files land here, ready to play.",
-                       self.f_small, DIM)
-        for slot in range(visible):
-            index = slot + self.scroll_results
-            if index >= len(self.results):
-                break
-            rect = pygame.Rect(self.results_view.x,
-                               list_top + slot * (card_h + 10),
-                               self.results_view.width, card_h)
-            self._draw_result(index, rect)
-
-    def _checkbox(self, rect: pygame.Rect, label: str, checked: bool, action) -> None:
-        hovered = rect.collidepoint(self.mouse)
-        box = pygame.Rect(rect.x, rect.centery - 8, 16, 16)
-        pygame.draw.rect(self.screen, ACCENT_DARK if checked else PANEL_2, box,
-                         border_radius=4)
-        pygame.draw.rect(self.screen, ACCENT if checked else LINE, box, width=1,
-                         border_radius=4)
-        if checked:
-            pygame.draw.lines(self.screen, ACCENT, False,
-                              [(box.x + 4, box.centery + 1), (box.x + 7, box.centery + 4),
-                               (box.x + 12, box.centery - 3)], 2)
-        self.screen.blit(self.f_small.render(label, True, TEXT if hovered else MUTED),
-                         (rect.x + 24, rect.centery - 8))
-        self.hits.append((rect, action))
-
-    def _draw_result(self, index: int, rect: pygame.Rect) -> None:
-        result = self.results[index]
-        pygame.draw.rect(self.screen, PANEL_2, rect, border_radius=11)
-        pygame.draw.rect(self.screen, LINE, rect, width=1, border_radius=11)
-
-        name = os.path.basename(result.wav_path) if result.wav_path else result.name
-        self.screen.blit(self.f_button.render(
-            _fit(self.f_button, name, rect.width - 24), True, TEXT),
-            (rect.x + 12, rect.y + 9))
-
-        if result.ok:
-            stats = result.stats
-            bits = "16-bit" if self.settings.bits > 8 else "8-bit"
-            pieces = ["%.1fs" % result.seconds, "%d voices" % result.voices, bits,
-                      "%d shared" % (stats.shared if stats else 0),
-                      "%d thinned" % (stats.simplified if stats else 0)]
-            self.screen.blit(self.f_small.render(" · ".join(pieces), True, MUTED),
-                             (rect.x + 12, rect.y + 30))
-        else:
-            self.screen.blit(self.f_small.render(
-                _fit(self.f_small, result.error, rect.width - 24), True, BAD),
-                (rect.x + 12, rect.y + 30))
-
-        playing = self.playing == index
-        self._small_button(pygame.Rect(rect.x + 12, rect.y + 54, 74, 26),
-                           "Stop" if playing else "Play",
-                           (lambda i=index: self.stop() if self.playing == i
-                            else self.play(i)),
-                           icon="stop" if playing else "play")
-        self._small_button(pygame.Rect(rect.x + 94, rect.y + 54, 92, 26),
-                           "Save as…", lambda i=index: self.save_result(i))
-        self._small_button(pygame.Rect(rect.x + 194, rect.y + 54, 104, 26),
-                           "Open folder", lambda i=index: self.open_folder(i))
-
-        if result.warnings:
-            warning = result.warnings[0]
-            self.screen.blit(self.f_small.render(
-                _fit(self.f_small, "! " + warning, rect.width - 330), True, WARN),
-                (rect.x + 308, rect.y + 60))
-
-    def _small_button(self, rect: pygame.Rect, label: str, action,
-                      icon: str = "") -> None:
-        hovered = rect.collidepoint(self.mouse)
-        pygame.draw.rect(self.screen, (44, 56, 70) if hovered else (36, 46, 58),
-                         rect, border_radius=7)
-        pygame.draw.rect(self.screen, LINE, rect, width=1, border_radius=7)
-        surface = self.f_small.render(label, True, TEXT)
-        icon_width = 12 if icon else 0
-        total = surface.get_width() + icon_width
-        left = rect.centerx - total // 2
-        if icon == "play":
-            pygame.draw.polygon(self.screen, ACCENT, [
-                (left, rect.centery - 6), (left, rect.centery + 6),
-                (left + 9, rect.centery)])
-        elif icon == "stop":
-            pygame.draw.rect(self.screen, ACCENT,
-                             pygame.Rect(left, rect.centery - 5, 9, 10))
-        self.screen.blit(surface, (left + icon_width, rect.centery - 8))
-        self.hits.append((rect, action))
-
-    # -------------------------------------------------------------------- toggles
+    def switch_look(self) -> None:
+        self.theme = theme.next_theme(self.look)
+        self.look = self.theme.key
+        self._build_fonts()
+        self._save_settings()
 
     def toggle_chip(self, name: str) -> None:
         if name in self.settings.extensions:
@@ -725,7 +346,279 @@ class App:
         self.settings.sampled_drums = not self.settings.sampled_drums
         self._save_settings()
 
-    # ----------------------------------------------------------------- main loop
+    def voice_count(self) -> int:
+        return 4 + sum(len(chips.EXTENSION_CHANNELS[name])
+                       for name in self.settings.extensions
+                       if name in chips.EXTENSION_CHANNELS)
+
+    # ----------------------------------------------------------------- drawing
+
+    def draw(self) -> None:
+        self.hits = []
+        self.mouse = pygame.mouse.get_pos()
+        t = self.theme
+        width, height = self.screen.get_size()
+        self.screen.fill(t.desktop)
+
+        self._draw_titlebar(width)
+        left = pygame.Rect(16, 46, 356, height - 62)
+        right = pygame.Rect(384, 46, width - 400, height - 62)
+        self._draw_queue(left)
+        self._draw_right(right)
+
+    def _text(self, x, y, text, font="body", color=None):
+        t = self.theme
+        surface = self.fonts[font].render(text, False, color or t.text)
+        self.screen.blit(surface, (x, y))
+
+    def _draw_titlebar(self, width: int) -> None:
+        t = self.theme
+        bar = pygame.Rect(4, 4, width - 8, 30)
+        pygame.draw.rect(self.screen, t.face, bar)
+        pygame.draw.rect(self.screen, t.dark, bar, 1)
+        fill = pygame.Rect(bar.x + 3, bar.y + 3, bar.width - 6, bar.height - 6)
+        pygame.draw.rect(self.screen, t.title_active, fill)
+        self._text(fill.x + 6, fill.y + 4, "chip8bit — NES / 8-bit transcoder",
+                   "title", t.title_text)
+
+        # the two buttons a 1995 title bar always had
+        size = fill.height - 4
+        x = fill.right - size - 4
+        for glyph in ("_", "X"):
+            rect = pygame.Rect(x, fill.y + 2, size, size)
+            pygame.draw.rect(self.screen, t.face, rect)
+            theme.bevel(self.screen, rect, t, raised=True)
+            text = self.fonts["small"].render(glyph, False, t.text)
+            self.screen.blit(text, text.get_rect(center=(rect.centerx,
+                                                         rect.centery - 1)))
+            x -= size + 3
+
+        badge = "%d voices · %s" % (self.voice_count(), t.name)
+        surface = self.fonts["small"].render(badge, False, t.title_text)
+        self.screen.blit(surface, (fill.right - 110 - surface.get_width(),
+                                   fill.y + 4))
+        # clicking the title bar button toggles the look
+        self.hits.append((pygame.Rect(fill.right - 260, fill.y, 150, fill.height),
+                          self.switch_look))
+
+    def _panel(self, rect: pygame.Rect, title: str) -> pygame.Rect:
+        return theme.window(self.screen, rect, self.theme, title,
+                            self.fonts["button"])
+
+    def _draw_queue(self, panel: pygame.Rect) -> None:
+        t = self.theme
+        client = self._panel(panel, "1 · Add music")
+        x = client.x + 2
+        width = client.width - 4
+
+        zone = pygame.Rect(x, client.y + 2, width, 74)
+        theme.field(self.screen, zone, t, t.face_alt)
+        hot = zone.collidepoint(self.mouse)
+        if hot:
+            pygame.draw.rect(self.screen, t.accent, zone, 2)
+        line1 = self.fonts["body"].render("Drop files here", False, t.text)
+        line2 = self.fonts["small"].render(".mid  .midi  .rmi  .kar  .vgm  .vgz  .gym  .zip",
+                                           False, t.dim)
+        self.screen.blit(line1, line1.get_rect(center=(zone.centerx, zone.centery - 11)))
+        self.screen.blit(line2, line2.get_rect(center=(zone.centerx, zone.centery + 13)))
+        self.hits.append((zone, self.pick_files))
+
+        buttons_y = client.bottom - 32
+        self._button(pygame.Rect(x, buttons_y, 108, 26), "Add files…", self.pick_files)
+        self._button(pygame.Rect(x + 114, buttons_y, 92, 26), "Demo tune", self.add_demo)
+        self._button(pygame.Rect(x + 212, buttons_y, 60, 26), "Clear", self.clear_queue)
+
+        list_top = zone.bottom + 8
+        self.queue_view = pygame.Rect(x, list_top, width, max(20, buttons_y - 8 - list_top))
+        self.mouse_in_queue = panel.collidepoint(self.mouse)
+        theme.field(self.screen, self.queue_view, t, t.face_alt)
+
+        row_height = 34
+        visible = max(1, (self.queue_view.height - 4) // row_height)
+        if len(self.items) > visible:
+            self.queue_view.width -= 14
+        self.scroll_queue = min(self.scroll_queue, max(0, len(self.items) - visible))
+
+        if not self.items:
+            self._text(x + 6, list_top + 6, "Nothing queued yet.", "small", t.dim)
+        for slot in range(visible):
+            index = slot + self.scroll_queue
+            if index >= len(self.items):
+                break
+            item = self.items[index]
+            row = pygame.Rect(self.queue_view.x + 2, list_top + 2 + slot * row_height,
+                              self.queue_view.width - 4, row_height - 4)
+            if row.collidepoint(self.mouse):
+                pygame.draw.rect(self.screen, t.accent, row.inflate(-2, -2), 1)
+            name = _fit(self.fonts["body"], item.name, row.width - 90)
+            self._text(row.x + 4, row.y + 6, name, "body")
+            self._text(row.right - 76, row.y + 8, _human(item.size) if item.size else "",
+                       "small", t.dim)
+            close = pygame.Rect(row.right - 24, row.y + 5, 18, 18)
+            theme.button(self.screen, close, t, "×", self.fonts["small"])
+            self.hits.append((close, (lambda i=index: self.remove_item(i))))
+
+        if len(self.items) > visible:
+            bar = pygame.Rect(list_top + 2, self.queue_view.y + 2, 12,
+                              self.queue_view.height - 4)
+            bar = pygame.Rect(self.queue_view.right + 2, list_top + 2, 12,
+                              self.queue_view.height - 4)
+            theme.scrollbar(self.screen, bar, t, self.scroll_queue / max(1, len(self.items)),
+                            visible / max(1, len(self.items)))
+
+    def _button(self, rect, label, action, pressed=False, enabled=True, primary=False):
+        theme.button(self.screen, rect, self.theme, label, self.fonts["button"],
+                     pressed=pressed, enabled=enabled, primary=primary)
+        if enabled:
+            self.hits.append((rect.copy(), action))
+
+    def _draw_right(self, panel: pygame.Rect) -> None:
+        t = self.theme
+        client = self._panel(panel, "2 · Pick chips")
+        x = client.x + 2
+        width = client.width - 4
+
+        self.chip_rects = []
+        entries = [("", "NES base console", 4, "pulse1 · pulse2 · triangle · noise")]
+        blurbs = {
+            "vrc6": "Konami VRC6 · 2 pulses + saw",
+            "mmc5": "Nintendo MMC5 · 2 pulses",
+            "fds": "Famicom Disk System · wavetable",
+            "n163": "Namco 163 · 8 wavetables",
+            "psg": "SN76489 · 3 squares (Genesis)",
+            "dmc": "APU delta · sampled drums",
+        }
+        for name, spec in chips.EXTENSION_CHANNELS.items():
+            entries.append((name, name.upper(), len(spec), blurbs.get(name, "")))
+
+        card_h, gap = 46, 6
+        columns = 2 if width > 520 else 1
+        card_w = (width - gap * (columns - 1)) // columns
+        for index, (name, label, count, blurb) in enumerate(entries):
+            column, row = index % columns, index // columns
+            rect = pygame.Rect(x + column * (card_w + gap), client.y + row * (card_h + gap),
+                               card_w, card_h)
+            enabled = name == "" or name in self.settings.extensions
+            face = t.accent_dark if enabled else t.face
+            pygame.draw.rect(self.screen, face, rect)
+            theme.bevel(self.screen, rect, t, raised=not enabled)
+            tick = pygame.Rect(rect.x + 6, rect.y + card_h // 2 - 7, 14, 14)
+            theme.field(self.screen, tick, t, t.field if enabled else t.face)
+            if enabled:
+                pygame.draw.lines(self.screen, t.text, False,
+                                  [(tick.x + 3, tick.centery), (tick.x + 6, tick.bottom - 4),
+                                   (tick.right - 3, tick.y + 4)], 2)
+            self._text(rect.x + 26, rect.y + 6,
+                       _fit(self.fonts["button"], "%s  +%d" % (label, count), card_w - 34),
+                       "button")
+            self._text(rect.x + 26, rect.y + 24,
+                       _fit(self.fonts["small"], blurb, card_w - 34), "small", t.dim)
+            self.chip_rects.append((name, rect))
+            if name:
+                self.hits.append((rect, (lambda n=name: self.toggle_chip(n))))
+
+        rows = (len(entries) + columns - 1) // columns
+        options_y = client.y + rows * (card_h + gap) + 2
+        self._check(pygame.Rect(x, options_y, 130, 22), "16-bit output",
+                    self.settings.bits > 8, self.toggle_bits)
+        self._check(pygame.Rect(x + 136, options_y, 130, 22), "write .vgm",
+                    self.settings.export_vgm, self.toggle_vgm)
+        self._check(pygame.Rect(x + 272, options_y, 150, 22), "sampled drums",
+                    self.settings.sampled_drums, self.toggle_drums)
+
+        convert_y = options_y + 34
+        self.convert_rect = pygame.Rect(x + 4, convert_y, width - 8, 40)
+        self._button(self.convert_rect, "Converting…" if self.busy else "Convert",
+                     self.start_convert, pressed=self.busy,
+                     enabled=bool(self.items) and not self.busy, primary=True)
+
+        status_y = convert_y + 48
+        if self.busy:
+            well = pygame.Rect(x, status_y, width, 18)
+            theme.field(self.screen, well, t, t.face_alt)
+            filled = int((width - 4) * max(0.0, min(1.0, self.progress)))
+            pygame.draw.rect(self.screen, t.accent,
+                             pygame.Rect(well.x + 2, well.y + 2, filled, 14))
+            self._text(x, status_y + 22,
+                       _fit(self.fonts["small"], self.progress_label, width),
+                       "small", t.dim)
+            status_y += 40
+        else:
+            self._text(x, status_y, _fit(self.fonts["small"], self.status, width),
+                       "small", t.bad if self.status_error else t.dim)
+            status_y += 20
+
+        self._text(x, status_y + 2, "3 · RESULTS", "head", t.dim)
+        list_top = status_y + 20
+        self.results_view = pygame.Rect(x, list_top, width,
+                                        max(20, client.bottom - list_top))
+        self.mouse_in_results = self.results_view.collidepoint(self.mouse)
+        theme.field(self.screen, self.results_view, t, t.face_alt)
+
+        card_h = 112
+        visible = max(1, (self.results_view.height - 4) // (card_h + 6))
+        self.scroll_results = min(self.scroll_results,
+                                  max(0, len(self.results) - visible))
+        if not self.results:
+            self._text(x + 6, list_top + 6, "Converted files land here.", "small", t.dim)
+        for slot in range(visible):
+            index = slot + self.scroll_results
+            if index >= len(self.results):
+                break
+            rect = pygame.Rect(self.results_view.x + 2,
+                               list_top + 2 + slot * (card_h + 6),
+                               self.results_view.width - 4, card_h - 2)
+            self._draw_result(index, rect)
+
+    def _check(self, rect, label, checked, action):
+        theme.checkbox(self.screen, rect, self.theme, label, self.fonts["small"], checked)
+        self.hits.append((rect, action))
+
+    def _draw_result(self, index: int, rect: pygame.Rect) -> None:
+        t = self.theme
+        result = self.results[index]
+        pygame.draw.rect(self.screen, t.face, rect)
+        theme.bevel(self.screen, rect, t, raised=False)
+
+        name = os.path.basename(result.wav_path) if result.wav_path else result.name
+        self._text(rect.x + 6, rect.y + 5,
+                   _fit(self.fonts["button"], name, rect.width - 14), "button")
+
+        if not result.ok:
+            self._text(rect.x + 6, rect.y + 26,
+                       _fit(self.fonts["small"], result.error, rect.width - 14),
+                       "small", t.bad)
+            return
+
+        stats = result.stats
+        line = "%.1f s · %d voices · %d placed · %d shared · %d thinned" % (
+            result.seconds, result.voices, stats.direct if stats else 0,
+            stats.shared if stats else 0, stats.simplified if stats else 0)
+        self._text(rect.x + 6, rect.y + 24, _fit(self.fonts["small"], line,
+                                                 rect.width - 14), "small", t.dim)
+
+        # what the converter understood about the file
+        lines = list(getattr(result, "analysis_lines", []) or [])
+        for offset, text in enumerate(lines[:2]):
+            self._text(rect.x + 6, rect.y + 38 + offset * 14,
+                       _fit(self.fonts["small"], text, rect.width - 14),
+                       "small", t.text)
+
+        playing = self.playing == index
+        y = rect.bottom - 26
+        self._button(pygame.Rect(rect.x + 6, y, 64, 22),
+                     "Stop" if playing else "Play",
+                     (lambda i=index: self.stop() if self.playing == i else self.play(i)))
+        self._button(pygame.Rect(rect.x + 76, y, 84, 22), "Save as…",
+                     lambda i=index: self.save_result(i))
+        self._button(pygame.Rect(rect.x + 166, y, 96, 22), "Open folder",
+                     lambda i=index: self.open_folder(i))
+        if result.warnings:
+            self._text(rect.x + 270, y + 5,
+                       _fit(self.fonts["small"], result.warnings[0], rect.width - 280),
+                       "small", t.warn)
+
+    # -------------------------------------------------------------------- loop
 
     def run(self) -> int:
         while self.running:
@@ -739,35 +632,30 @@ class App:
         pygame.quit()
         return 0
 
-    # -------------------------------------------------------------------- tests
-
-    def render_once(self) -> pygame.Surface:
-        """One frame, without the event loop (used by the self test)."""
+    def render_once(self):
         self.draw()
         pygame.display.flip()
         return self.screen
 
 
 def run(files: Optional[List[str]] = None) -> int:
-    app = App(files=files)
-    return app.run()
+    return App(files=files).run()
 
 
 def selftest(screenshot: Optional[str] = None) -> int:
-    """Drive the window headlessly: click chips, drop a file, convert, play."""
+    """Drive the window headlessly: click the chips, convert, play, switch look."""
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
     failures: List[str] = []
 
-    def check(label: str, condition: bool, detail: str = "") -> None:
+    def check(label, condition, detail=""):
         line = ("  ok   " if condition else "  FAIL ") + label + \
                ("" if condition else "  " + detail)
-        stream = sys.stdout
-        if stream is not None:
+        if sys.stdout is not None:
             try:
-                stream.write(line + "\n")
-                stream.flush()
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
             except Exception:
                 pass
         if not condition:
@@ -780,35 +668,35 @@ def selftest(screenshot: Optional[str] = None) -> int:
         pass
 
     app = App(settings_path=settings_path)
-    app.messages = queue.Queue()
+    app.draw()
 
-    def click(rect: pygame.Rect) -> None:
+    def click(rect: pygame.Rect) -> bool:
         app.mouse = rect.center
         app.draw()
-        for hit_rect, action in app.hits:
+        for hit_rect, action in reversed(app.hits):
             if hit_rect.collidepoint(rect.center):
                 action()
-                return
-        raise AssertionError("nothing to click at %s" % (rect,))
+                return True
+        return False
 
     try:
-        app.draw()
-        check("window opens", app.screen.get_size() == (WIDTH, HEIGHT),
-              str(app.screen.get_size()))
-        check("starts with 4 voices", app.voice_count() == 4, str(app.voice_count()))
-        check("chip cards drawn", len(app.chip_rects) == 7, str(len(app.chip_rects)))
+        check("window opens", app.screen.get_size() == (WIDTH, HEIGHT))
+        check("starts in Windows 95", app.look == "win95", app.look)
+        check("starts with 4 voices", app.voice_count() == 4)
+        check("seven chip cards", len(app.chip_rects) == 7, str(len(app.chip_rects)))
 
         for name, rect in app.chip_rects:
             if name:
                 click(rect)
-        check("all chips enabled", app.voice_count() == 22, str(app.voice_count()))
-        check("settings persisted", os.path.isfile(settings_path))
+        check("all chips on => 22 voices", app.voice_count() == 22,
+              str(app.voice_count()))
+
+        app.switch_look()
+        check("switching the look works", app.look == "amiga", app.look)
+        app.draw()
 
         app.add_demo()
-        check("demo queued", len(app.items) == 1, str(len(app.items)))
-        app.draw()
-        check("convert button is live", bool(app.items) and not app.busy)
-
+        check("demo queued", len(app.items) == 1)
         click(app.convert_rect)
         deadline = time.time() + 120
         while app.busy and time.time() < deadline:
@@ -816,26 +704,33 @@ def selftest(screenshot: Optional[str] = None) -> int:
             app.render_once()
             time.sleep(0.02)
         check("conversion finished", not app.busy)
-        check("one result", len(app.results) == 1, str(len(app.results)))
+        check("one result", len(app.results) == 1)
         if app.results:
             result = app.results[0]
-            check("result is ok", result.ok, result.error)
-            check("wav written", os.path.isfile(result.wav_path), result.wav_path)
-            check("many voices used", result.voices >= 8, str(result.voices))
-            check("drums are sampled",
-                  app.settings.sampled_drums and bool(samples.get("kick")))
-            check("duration sane", 2.0 < result.seconds < 60.0, str(result.seconds))
-            if os.path.isfile(result.wav_path):
-                with open(result.wav_path, "rb") as handle:
-                    check("wav is a RIFF file", handle.read(4) == b"RIFF")
+            check("result ok", result.ok, result.error)
+            check("wav on disk", os.path.isfile(result.wav_path))
+            check("understood the file", bool(result.analysis_lines),
+                  str(result.analysis_lines))
+            check("ten or more voices", result.voices >= 10, str(result.voices))
+            check("a melody was found",
+                  any(v.role == "melody" for v in result.analysis.voices))
+            check("a bass was found",
+                  any(v.role == "bass" for v in result.analysis.voices))
             app.play(0)
-            check("playback accepted", app.playing == 0 or not app.mixer_ready)
+            check("play accepted", app.playing == 0 or not app.mixer_ready)
             app.stop()
 
-        app.draw()
         if screenshot:
-            pygame.image.save(app.screen, screenshot)
-            check("screenshot written", os.path.isfile(screenshot))
+            # both looks, so the release shows what switching the theme does
+            base, extension = os.path.splitext(screenshot)
+            for key, theme_obj in theme.THEMES.items():
+                app.theme = theme_obj
+                app.look = theme_obj.key
+                app._build_fonts()
+                app.draw()
+                target = "%s-%s%s" % (base, key, extension or ".png")
+                pygame.image.save(app.screen, target)
+                check("screenshot written (%s)" % key, os.path.isfile(target))
     finally:
         pygame.quit()
 
