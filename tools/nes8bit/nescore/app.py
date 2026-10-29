@@ -28,6 +28,7 @@ from . import chips, convert, dialogs, demo, gm, theme
 WIDTH, HEIGHT = 1080, 760
 PATTERN_SPEED = 6          # ticks per pattern row, so an 8 s song is ~64 rows
 GROUP_SIZE = 4             # columns per row-number group, as in FastTracker II
+PATTERN_ROWS = 64          # a pattern is 64 rows; a long song is several patterns
 
 
 def _groups(columns: int) -> int:
@@ -583,7 +584,9 @@ class App:
         if result.ok:
             kept = "%d notes kept" % result.kept
             if getattr(result, "left_out", 0):
-                kept += " · %d left out (no free channel)" % result.left_out
+                kept += " · %d left out" % result.left_out
+            if getattr(result, "thinned", 0):
+                kept += " · %d lines thinned" % result.thinned
             if getattr(result, "dropped", 0):
                 kept += " · %d too quiet" % result.dropped
             out.append(kept)
@@ -702,9 +705,10 @@ class App:
             self._text(box.x + (box.width - name_w) // 2, box.y + 9, name,
                        "tiny", _chip_colour(t, channels[index]))
 
-        readout = "ROW %02X  %0.1fs  BPM %d" % (
-            (hover if hover is not None else self.pattern_row) % 256,
-            (hover if hover is not None else self.pattern_row) * row_seconds,
+        cursor = hover if hover is not None else self.pattern_row
+        readout = "PAT %02X:%02X  %0.1fs  %d BPM" % (
+            cursor // PATTERN_ROWS, cursor % PATTERN_ROWS,
+            cursor * row_seconds,
             int(round(getattr(result, "tempo", 0.0) or 120.0)))
         readout_x = head.right - self.fonts["tiny"].size(readout)[0] - 4
         self._text(readout_x, head.y + 4, readout, "tiny", t.dim)
@@ -728,11 +732,13 @@ class App:
             elif row_index % 4 == 0:
                 pygame.draw.rect(self.screen, t.stripe, row_rect)
 
-            # the row number repeats at the head of every group, like FT2
+            # the row number repeats at the head of every group, like FT2, and
+            # wraps every 64 rows because that is one pattern
+            pattern_row = row_index % PATTERN_ROWS
             for slot_index in range(0, columns, GROUP_SIZE):
                 number_x = positions[slot_index] - group_gap + 4
-                number_color = t.accent if row_index % 16 == 0 else t.text
-                self._text(number_x, y, "%02X" % (row_index % 256), "tiny",
+                number_color = t.accent if pattern_row % 16 == 0 else t.text
+                self._text(number_x, y, "%02X" % pattern_row, "tiny",
                            number_color)
             # a faint divider between each group of four voices, like the grid
             for slot_index in range(GROUP_SIZE, columns, GROUP_SIZE):
@@ -958,8 +964,8 @@ class App:
                 line = "%d voices · %d kept" % (result.voices, result.kept)
                 if result.left_out:
                     line += " · %d left out" % result.left_out
-                if getattr(result, "dropped", 0):
-                    line += " · %d dropped" % result.dropped
+                if getattr(result, "thinned", 0):
+                    line += " · %d thinned" % result.thinned
             else:
                 line = "failed: " + result.error[:30]
             self._text(row.x + 12, row.y + 14, _fit(self.fonts["tiny"], line,

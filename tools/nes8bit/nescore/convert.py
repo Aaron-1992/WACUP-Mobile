@@ -72,6 +72,7 @@ class Result:
     tempo: float = 120.0
     kept: int = 0
     left_out: int = 0              # no free channel: report, never cram in
+    thinned: int = 0               # extra duplicate lines dropped on purpose
     dropped: int = 0               # too short / too quiet to keep
     warnings: List[str] = field(default_factory=list)
     source_format: str = ""
@@ -179,6 +180,7 @@ def convert_file(source: str, settings: Settings,
     result.kept = len(notes)
     result.left_out = stats.simplified
     result.dropped = stats.dropped
+    result.thinned = stats.voices_thinned
     result.seconds = duration
     result.voices = len(stats.per_channel_notes)
     result.channels = dict(sorted(stats.per_channel_notes.items()))

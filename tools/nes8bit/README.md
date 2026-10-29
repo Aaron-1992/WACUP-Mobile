@@ -17,7 +17,12 @@ re-composes them for the NES sound chip, then renders 8-bit audio.
 * **every hardware voice is used, and extension chips can be switched on** (4 → 22);
 * **channels are not crammed** — when every voice is busy the note is left out and
   counted, rather than squeezed in as an arpeggio. The melody, bass and drums always
-  get a voice first, so the important line is never the one that gets dropped.
+  get a voice first, so the important line is never the one that gets dropped;
+* **the tune survives the tempo** — a 226 BPM game tune is full of 33 ms sixteenth
+  notes; they are given the shortest length the chip can actually articulate
+  instead of being thrown away as "too short";
+* **a mix, not a pile** — the melody sits on top, the bass under it, the chord bed
+  under both, and no more than a handful of duplicate lines play at once.
 
 ## The window
 
@@ -133,20 +138,32 @@ like one, so:
 5. percussion may **take a channel from a hi-hat** — a missing backbeat is worse
    than a clipped hat, and that is what real NES drum code does;
 6. parts that duplicate each other note for note are folded into one;
-7. anything left over is **dropped and counted**, not smuggled in — there is no
+7. every line keeps **its own channel** once it has one, so a chord sounds like a
+   chord and the part does not jump between voices;
+8. with extension chips on, at most a **handful of separate lines** play at once
+   (one melody, one rhythm, a few counter-melodies, the strongest chord voices).
+   A full-band MIDI export has five guitar parts and eleven harmony lines; that is
+   not an arrangement, it is mud, so the strongest lines are kept and the rest are
+   reported as thinned;
+9. anything left over is **dropped and counted**, not smuggled in — there is no
    arpeggio cramming. The header and the result card say exactly how many notes
-   were left out, and where they came from.
+   were left out or thinned, and where they came from.
 
-Measured on the built-in demo tune (169 notes):
+Measured on a real 226 BPM game tune (3806 notes, 2.5 minutes — the athletic-theme
+case the tests now cover with a generated stand-in):
 
-| chips | kept | left out | dropped |
-| --- | --- | --- | --- |
-| bare NES (4 voices) | 121 | 34 (24 drum, 10 harmony) | 17 |
-| + VRC6 (7) | 140 | 27 | 5 |
-| + VRC6, MMC5, FDS (10) | 148 | 24 (all drum) | 0 |
-| all chips (22) | 164 | 8 (all drum) | 0 |
+| chips | notes kept | left out | lines thinned | voices used |
+| --- | --- | --- | --- | --- |
+| bare NES (4) | 3335 | 286 | – | 4 |
+| + VRC6 (7) | 3435 | 186 | – | 7 |
+| all chips (22) | 2980 | 6 | 7 | 13 |
 
-`--stats` (and the result card) tells you the exact count of each outcome.
+On the built-in demo tune (169 notes): bare NES keeps 121 (34 left out: 24 drum,
+10 harmony), all chips keep 146 and thin one spare line. Nothing is ever dropped for
+being "too short" any more.
+
+`--stats` (and the result card) tells you the exact count of each outcome, including
+which lines were thinned and why.
 
 ## How it sounds
 

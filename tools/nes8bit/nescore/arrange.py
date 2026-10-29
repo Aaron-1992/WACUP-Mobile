@@ -14,7 +14,7 @@ The rules are the ones an NES composer uses by hand:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from . import analyze, gm
 from .chips import DRUM_MAP, MELODIC_KINDS, ChannelSpec
@@ -65,7 +65,11 @@ class Options:
 
     # A chip channel is monophonic: pretending otherwise is what makes converted
     # music sound like a wasp in a jar. Sharing is therefore strictly rationed.
-    dedupe: bool = True               # drop notes that double another part exactly
+    dedupe: bool = True
+    # How many separate lines of each kind the arrangement is allowed to use.
+    # 0 = decide from the number of channels (see _voice_budget). A console tune
+    # is a handful of lines, not every part of an orchestral MIDI at once.
+    voice_budget: Optional[Dict[str, int]] = None               # drop notes that double another part exactly
     max_cluster_notes: int = 3        # never arpeggiate more than a triad
     min_cluster_seconds: float = 0.12  # short blips are not worth splitting
     share_budget: float = 0.10        # at most this share of the notes may share
@@ -80,6 +84,8 @@ class Stats:
     dropped: int = 0              # too short / too quiet / unplaceable
     simplified: int = 0           # left out on purpose so the mix stays clean
     left_out: Dict[str, int] = field(default_factory=dict)
+    voices_thinned: int = 0       # extra lines dropped so the mix stays readable
+    thinned: Dict[str, int] = field(default_factory=dict)
     deduped: int = 0              # doubled another part note for note
     channels_used: Dict[str, int] = field(default_factory=dict)
     per_channel_notes: Dict[str, int] = field(default_factory=dict)
@@ -89,13 +95,21 @@ class Stats:
         lines = [
             "  notes placed directly on a suited channel : %d" % self.direct,
             "  notes re-homed onto a free spare channel   : %d" % self.overflow,
-            "  notes left out (no free channel)           : %d" % self.simplified,
-            "    of which harmony                         : %d"
-            % self.left_out.get("harmony", 0),
-            "    of which percussion                      : %d"
-            % self.left_out.get("drum", 0),
-            "    of which counter-melody                  : %d"
-            % self.left_out.get("counter", 0),
+            "  left out (no free channel)                 : %d" % self.simplified,
+        ]
+        if self.left_out:
+            for role in ("harmony", "drum", "counter", "bass", "melody"):
+                if self.left_out.get(role):
+                    lines.append("    of which %-31s: %d" % (role, self.left_out[role]))
+        lines += [
+            "  extra lines thinned out (too many at once): %d" % self.voices_thinned,
+        ]
+        if self.thinned:
+            for role in ("harmony", "drum", "counter", "rhythm", "bass", "melody"):
+                if self.thinned.get(role):
+                    lines.append("    dropped %-27s: %d notes"
+                                 % (role, self.thinned[role]))
+        lines += [
             "  doubled notes folded into one              : %d" % self.deduped,
             "  notes dropped (too short/quiet)            : %d" % self.dropped,
             "  channel-sharing clusters                   : %d" % self.clusters,
@@ -158,6 +172,67 @@ def _duty_for(note: Note) -> float:
     return duty
 
 
+def _voice_budget(channel_count: int) -> Optional[Dict[str, int]]:
+    """How many separate lines of each kind an arrangement may use.
+
+    A bare NES has four voices and the channel contention already picks the best
+    line for every note, so nothing is thrown away there. Once extension chips are
+    switched on there are up to 22 voices, and a full-band MIDI export will happily
+    occupy every one of them at once: five guitar parts and eleven harmony lines is
+    not an arrangement, it is mud. In that case keep the strongest few lines of
+    each kind — which is what the composer of a chip tune would have done anyway.
+    """
+    if channel_count < 8:
+        return None
+    return {
+        "melody": 1,                       # one lead, always
+        "bass": 2,
+        "drum": 2,
+        "counter": max(2, channel_count // 5),
+        "rhythm": 1,
+        "harmony": max(3, channel_count // 4),
+    }
+
+
+def _thin_voices(notes: List[Note], budget: Dict[str, int],
+                 stats: Stats) -> List[Note]:
+    """Keep the strongest few lines of each kind, drop the rest.
+
+    A MIDI export of a full band has five guitar parts and eleven harmony lines;
+    a console has four to twenty-two voices and a listener with two ears. Rank the
+    lines by how much music they actually play and how loud they are, keep the
+    best ones, and say in the stats what went — this is the "choose wisely" half
+    of not cramming everything into the channels.
+    """
+    lines: Dict[tuple, List[Note]] = {}
+    for note in notes:
+        lines.setdefault((note.role, note.voice, note.part), []).append(note)
+
+    by_role: Dict[str, List[tuple]] = {}
+    for key, line_notes in lines.items():
+        sounding = sum(n.dur for n in line_notes)
+        mean_velocity = sum(n.velocity for n in line_notes) / len(line_notes)
+        by_role.setdefault(key[0], []).append(
+            ((mean_velocity, sounding), key, line_notes))
+
+    keep: List[Note] = []
+    for role, entries in by_role.items():
+        allowance = budget.get(role, 1)
+        entries.sort(key=lambda item: item[0], reverse=True)
+        for index, (score, key, line_notes) in enumerate(entries):
+            if index < allowance:
+                keep.extend(line_notes)
+                continue
+            stats.voices_thinned += 1
+            stats.thinned[role] = stats.thinned.get(role, 0) + len(line_notes)
+    return keep
+
+
+# Below this a note is shorter than the attack the renderer gives it, so it can
+# only ever be a click: that is a parsing artefact, not music.
+_UNPLAYABLE = 0.006
+
+
 class _ChannelState:
     """Notes currently sounding on one channel, used for overlap checks."""
 
@@ -197,6 +272,8 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
 
     clusters: List[_Cluster] = []
     placed: List[Note] = []
+    voice_channel: Dict[tuple, str] = {}     # (part, voice) -> channel it lives on
+    claims: Dict[str, tuple] = {}            # channel -> the line that owns it
 
     # Work on copies: one song object can be arranged several ways in a session
     # (bare NES, then every extension), and the caller's notes must stay untouched.
@@ -204,6 +281,11 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     _articulate(source_notes)
     if options.dedupe:
         source_notes = _dedupe(source_notes, stats)
+    budget = options.voice_budget
+    if budget is None:
+        budget = _voice_budget(len(channels))
+    if budget:
+        source_notes = _thin_voices(source_notes, budget, stats)
     share_budget = int(len(source_notes) * max(0.0, options.share_budget))
 
     # Three passes, most important music first. A harmony note can only take what
@@ -213,7 +295,7 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     for roles, key in (
             (("drum", "melody", "bass"), lambda n: (n.start, -n.velocity, n.pitch)),
             (("counter", "rhythm"), lambda n: (n.start, -n.velocity, n.pitch)),
-            (("harmony", "melodic", "melody"), lambda n: (n.start, n.pitch, -n.velocity))):
+            (("harmony", "melodic"), lambda n: (n.start, n.pitch, -n.velocity))):
         group = [n for n in source_notes if n.role in roles]
         ordered.extend(sorted(group, key=key))
     seen = set(id(n) for n in ordered)
@@ -221,9 +303,17 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
                           key=lambda n: (n.start, n.pitch)))
 
     for note in ordered:
-        if note.dur < options.min_duration or note.velocity < options.quietest:
+        if note.velocity < options.quietest or note.dur < _UNPLAYABLE:
             stats.dropped += 1
             continue
+        if note.dur < options.min_duration:
+            # A note this short is still music, not noise: give it the shortest
+            # length the console can actually articulate instead of throwing it
+            # away. Dropping 33 ms melody notes is how a fast tune loses its tune.
+            if note.role == "drum":
+                note.dur = max(note.dur, 1.0 / max(1.0, options.fps))
+            else:
+                note.dur = options.min_duration
         if options.transpose:
             note.pitch = max(0, min(127, note.pitch + options.transpose))
 
@@ -241,18 +331,38 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
             note.noise_period = period
             note.noise_short = short
 
-        # 1) a free channel of a kind the part actually wants
+        # 1) the channel this line already lives on, if it is still free.
+        #    A console arrangement gives each musical line its own channel; that
+        #    is what makes a chord sound like a chord instead of a fast run of
+        #    single notes on whichever channel happens to be idle.
+        key = (note.part, note.voice)
         chosen = None
-        for kind in wanted_kinds:
-            for state in by_kind.get(kind, []):
-                if state.free_at(note.start, note.end()):
-                    chosen = state
-                    stats.direct += 1
-                    break
-            if chosen:
-                break
+        home = voice_channel.get(key)
+        if home is not None:
+            state = states.get(home)
+            if state is not None and state.free_at(note.start, note.end()):
+                chosen = state
+                stats.direct += 1
 
-        # 2) any free melodic channel, whatever chip it belongs to
+        # 2) otherwise give the line a channel of its own. A channel no other
+        #    line has claimed wins, so the parts spread out over every chip that
+        #    is switched on instead of piling onto the first pulse wave.
+        if chosen is None:
+            candidates = []
+            for rank, kind in enumerate(wanted_kinds):
+                for state in by_kind.get(kind, []):
+                    if not state.free_at(note.start, note.end()):
+                        continue
+                    owner = claims.get(state.spec.id)
+                    score = (0 if owner is None or owner == key else 1,
+                             rank, state.spec.priority)
+                    candidates.append((score, state))
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                chosen = candidates[0][1]
+                stats.direct += 1
+
+        # 3) any free melodic channel, whatever chip it belongs to
         if chosen is None and (not drum):
             for kind in sorted(by_kind, key=lambda k: by_kind[k][0].spec.priority):
                 if kind in ("noise", "dmc"):
@@ -292,6 +402,14 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
             else:
                 stats.dropped += 1
             continue
+
+        if not drum:
+            if key not in voice_channel:
+                if claims.get(chosen.spec.id) in (None, key):
+                    voice_channel[key] = chosen.spec.id
+                    claims[chosen.spec.id] = key
+            elif claims.get(chosen.spec.id) == key:
+                voice_channel[key] = chosen.spec.id
 
         note.channel = chosen.spec.id
         note.volume = _velocity_to_level(note.velocity, note.role)
@@ -365,10 +483,15 @@ def _articulate(notes: List[Note]) -> None:
                 # a repeated note has to be re-attacked: that is a rhythm
                 note.dur = min(note.dur, max(0.05, following.start - note.start - 0.01))
             elif legato > 0.5 and gap < 0.06:
-                # hold through the join, so the chip does not click back in
-                note.dur = max(note.dur, following.start - note.start + 0.004)
-            elif mean_gap > 0.12:
-                # detached playing: keep the gap, it is part of the phrasing
+                # hold through the join, so the chip does not click back in —
+                # but stop a hair before the next note, otherwise the line
+                # overlaps itself and can never stay on one channel
+                note.dur = max(note.dur, max(0.01, following.start - note.start - 0.002))
+            elif mean_gap > 0.12 and note.dur > 0.08:
+                # detached playing: keep the gap, it is part of the phrasing.
+                # Short notes are already detached — shaving them further would
+                # push them under the "too short to bother" floor and delete the
+                # tune (a fast 16th is only 33 ms).
                 note.dur = note.dur * 0.85
 
 
@@ -378,27 +501,34 @@ def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
     Two parts on the same pitch at the same moment sound as one voice on a chip,
     so one copy goes — and it is never the melody or the bass that goes, no matter
     which one started a millisecond earlier.
+
+    The test is a real overlap, not "these two are close": at 226 BPM a hi-hat
+    every 33 ms would otherwise fold into the next one and half the groove would
+    silently disappear.
     """
     buckets: Dict[tuple, List[Note]] = {}
     for note in notes:
-        key = (note.pitch, int(round(note.start / 0.04)))
+        key = (note.pitch, int(round(note.start / 0.01)))
         buckets.setdefault(key, []).append(note)
 
     kept: List[Note] = []
     for group in buckets.values():
-        if len(group) == 1:
-            kept.append(group[0])
-            continue
         group.sort(key=lambda n: (-_rank(n), -n.velocity))
-        winner = group[0]
-        for other in group[1:]:
-            if abs(other.start - winner.start) > 0.04 and \
-                    min(other.end(), winner.end()) - max(other.start, winner.start) <= 0:
-                kept.append(other)          # not actually simultaneous
+        winners: List[Note] = []
+        for note in group:
+            host = None
+            for candidate in winners:
+                overlap = min(note.end(), candidate.end()) - \
+                    max(note.start, candidate.start)
+                if overlap > 0.002 and abs(note.start - candidate.start) < 0.03:
+                    host = candidate
+                    break
+            if host is None:
+                winners.append(note)
                 continue
             stats.deduped += 1
-            winner.velocity = max(winner.velocity, other.velocity)
-        kept.append(winner)
+            host.velocity = max(host.velocity, note.velocity)
+        kept.extend(winners)
     return kept
 
 

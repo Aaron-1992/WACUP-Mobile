@@ -16,6 +16,7 @@ sys.path.insert(0, HERE)
 
 import make_test_midi                                     # noqa: E402
 from nescore import analyze, chips, importers              # noqa: E402
+from nescore import arrange as arrange_module             # noqa: E402
 from nescore.arrange import Options, arrange               # noqa: E402
 from nescore.cli import main                               # noqa: E402
 from nescore.render import (RenderOptions, render, render_channel,   # noqa: E402
@@ -129,6 +130,43 @@ def main_test() -> None:
     check("legato lines are not re-attacked note by note",
           joined > 0 or len(legato_notes) < 2, str(joined))
 
+    print("a fast tune (226 BPM, 33 ms notes)")
+    fast_path = make_test_midi.write_fast(os.path.join(work, "fast-tune.mid"))
+    fast_song = importers.find_for(fast_path)(fast_path)
+    fast_analysis = analyze.analyse(fast_song)
+    check("fast tune parsed", len(fast_song.notes) > 300, str(len(fast_song.notes)))
+    check("fast tempo read", abs(fast_analysis.tempo - 226) < 2,
+          str(fast_analysis.tempo))
+    short_notes = [n for n in fast_song.notes if n.dur < 0.04]
+    check("the file really is full of tiny notes", len(short_notes) > 40,
+          str(len(short_notes)))
+
+    fast_notes, fast_stats = arrange(fast_song, base_channels, Options(),
+                                     analysis=fast_analysis)
+    fast_melody = [n for n in fast_notes if n.role == "melody"]
+    wanted = [n for n in fast_song.notes if n.role == "melody"]
+    check("a fast tune keeps its melody on a bare NES",
+          len(fast_melody) >= 0.95 * len(wanted),
+          "%d of %d" % (len(fast_melody), len(wanted)))
+    check("tiny notes are lengthened, not thrown away", fast_stats.dropped == 0,
+          "dropped %d" % fast_stats.dropped)
+    check("the melody never lands on another line's channel",
+          len({n.channel for n in fast_melody}) == 1,
+          str(sorted({n.channel for n in fast_melody})))
+    fast_drums = [n for n in fast_notes if n.role == "drum"]
+    check("20 ms drum hits survive", len(fast_drums) >= 0.8 * sum(
+        1 for n in fast_song.notes if n.role == "drum"), str(len(fast_drums)))
+
+    wide_notes, wide_stats = arrange(
+        fast_song, chips.build_channel_set(list(chips.EXTENSION_CHANNELS)),
+        Options(), analysis=fast_analysis)
+    check("the chips are used, not just the first pulse wave",
+          len(wide_stats.per_channel_notes) >= 8,
+          str(sorted(wide_stats.per_channel_notes)))
+    check("extra chips lose no more notes", wide_stats.dropped == 0)
+    check("a chord really sounds at once", _simultaneity(wide_notes) >= 2.0,
+          "%.2f notes at a time" % _simultaneity(wide_notes))
+
     print("rendering")
     grouped = {}
     for note in base_notes:
@@ -164,6 +202,65 @@ def main_test() -> None:
         if name in ext_stems:
             check("%s produced sound" % name, rms(
                 bytes(int((v * 0.5 + 0.5) * 255) for v in ext_stems[name])) > 0.5)
+
+    print("voice budgeting (a few lines, not every part at once)")
+    crowd = []
+    for voice_index in range(6):                 # six harmony lines at once
+        for step in range(8):
+            crowd.append(Note(start=step * 0.25, dur=0.24,
+                              pitch=55 + voice_index,
+                              velocity=90 - voice_index * 6,
+                              part=voice_index + 1, role="harmony",
+                              voice=voice_index))
+    budget = arrange_module._voice_budget(22)
+    crowd_stats = arrange_module.Stats()
+    kept_crowd = arrange_module._thin_voices(crowd, budget, crowd_stats)
+    check("too many lines get thinned, and it is reported",
+          crowd_stats.voices_thinned > 0, str(crowd_stats.voices_thinned))
+    check("only the budget's worth of lines is kept",
+          len({n.voice for n in kept_crowd}) == budget["harmony"],
+          "%d of 6 lines" % len({n.voice for n in kept_crowd}))
+    check("the quietest line is the one dropped",
+          60 not in {n.pitch for n in kept_crowd},
+          str(sorted({n.pitch for n in kept_crowd})))
+    check("thinning is explained in the stats text",
+          any("thinned" in line for line in crowd_stats.as_lines()))
+    check("a big console still gets an arrangement-sized budget",
+          2 <= budget["harmony"] <= 8 and budget["melody"] == 1, str(budget))
+    check("a bare NES is left alone (contention already picks the best line)",
+          arrange_module._voice_budget(4) is None)
+    budget_notes, _ = arrange(
+        fast_song, chips.build_channel_set(list(chips.EXTENSION_CHANNELS)),
+        Options(), analysis=fast_analysis)
+    check("exactly one melody line is used",
+          len({n.channel for n in budget_notes if n.role == "melody"}) <= 1)
+    check("the tune survives the thinning",
+          sum(1 for n in budget_notes if n.role == "melody") >= 0.95 * sum(
+              1 for n in fast_song.notes if n.role == "melody"),
+          str(sum(1 for n in budget_notes if n.role == "melody")))
+
+    print("the mix (measured from the pre-master stems)")
+    role_energy = {}
+    roles_by_channel = {}
+    for note in all_notes:
+        roles_by_channel.setdefault(note.channel, set()).add(note.role)
+    for channel_id, buf in ext_stems.items():
+        energy = sum((v - 0.0) ** 2 for v in buf) / max(1, len(buf))
+        for role in roles_by_channel.get(channel_id, ()):
+            role_energy[role] = role_energy.get(role, 0.0) + energy
+    level = {role: value ** 0.5 for role, value in role_energy.items()}
+    check("the melody is in the mix", level.get("melody", 0.0) > 0,
+          str(sorted(level.items())))
+    check("the melody is not buried under the chord bed",
+          level.get("melody", 0.0) >= level.get("harmony", 0.0),
+          "melody %.3f harmony %.3f" % (level.get("melody", 0),
+                                        level.get("harmony", 0)))
+    check("the melody is not buried under the bass",
+          level.get("melody", 0.0) >= 0.85 * level.get("bass", 0.0),
+          "melody %.3f bass %.3f" % (level.get("melody", 0),
+                                     level.get("bass", 0)))
+    check("the drums are audible", level.get("drum", 0.0) > 0.25 * level.get("melody", 0),
+          "drum %.3f melody %.3f" % (level.get("drum", 0), level.get("melody", 0)))
 
     print("synthesis accuracy (measured by zero crossings)")
     every_channel = chips.build_channel_set(list(chips.EXTENSION_CHANNELS))
@@ -239,6 +336,26 @@ def main_test() -> None:
 
     print("\n%d check(s) failed" % len(FAILURES))
     return 0 if not FAILURES else 1
+
+
+def _simultaneity(notes) -> float:
+    """Average number of notes sounding at the same time."""
+    if not notes:
+        return 0.0
+    events = []
+    for note in notes:
+        events.append((note.start, 1))
+        events.append((note.end(), -1))
+    events.sort(key=lambda item: (item[0], -item[1]))
+    area = 0.0
+    last = events[0][0] if events else 0.0
+    current = 0
+    for moment, delta in events:
+        area += current * (moment - last)
+        last = moment
+        current += delta
+    span = max(n.end() for n in notes) - min(n.start for n in notes)
+    return area / span if span > 0 else 0.0
 
 
 def _measure(channel_id: str, pitch: int, channels) -> float:

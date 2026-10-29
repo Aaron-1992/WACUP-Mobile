@@ -39,7 +39,21 @@ from .model import Note
 APU_CLOCK = 1789773.0     # NTSC NES CPU clock
 MAX_RUN = 64              # samples per write; short runs let the envelope move
 VIBRATO_HZ = 5.5          # the wobble a MIDI CC1 slide actually sounds like
+# The mix, by musical role. A chip cannot turn a chord down the way a synthesiser
+# can (the triangle has no volume register at all), so the balance is done here:
+# the tune on top, the bass under it, the chord bed underneath both, drums in front
+# of the bed but never over the lead.
+ROLE_GAIN = {
+    "melody": 1.0,
+    "counter": 0.55,
+    "rhythm": 0.50,
+    "harmony": 0.36,
+    "bass": 0.42,
+    "drum": 0.95,
+}
+
 ATTACK = 0.004            # seconds; kills the start-of-note click
+HIT_ATTACK = 0.001        # seconds; drums keep their transient
 RELEASE = 0.012           # seconds; kills the end-of-note click
 LOWPASS_HZ = 11000.0      # tames square-wave fizz without dulling the sound
 
@@ -85,8 +99,12 @@ def _envelope(note: Note, elapsed: float) -> float:
     if elapsed < 0 or elapsed >= duration:
         return 0.0
     base = _base_level(note, elapsed / duration)
-    attack = min(1.0, elapsed / ATTACK)
-    release = min(1.0, (duration - elapsed) / RELEASE)
+    # Short notes get proportionally shorter ramps: a 33 ms sixteenth cannot
+    # afford a 12 ms fade-out, or the tune turns into a row of blips.
+    attack_time = min(ATTACK, duration * 0.30)
+    release_time = min(RELEASE, duration * 0.35)
+    attack = min(1.0, elapsed / max(1e-4, attack_time))
+    release = min(1.0, (duration - elapsed) / max(1e-4, release_time))
     return base * math.sqrt(attack) * (release ** 0.45)
 
 
@@ -199,8 +217,9 @@ def _emit_sample(buf, a: int, b: int, note: Note, rate: int, gain: float) -> Non
         value = piece[sample_index]
         if sample_index + 1 < len(piece):
             value += (piece[sample_index + 1] - value) * fraction
-        # a hit's own decay is baked into the sample, so only the start matters
-        attack = min(1.0, index / max(1.0, ATTACK * rate))
+        # a hit's own decay is baked into the sample, so only the start matters —
+        # and a 20 ms hat cannot spend 4 ms of itself fading in
+        attack = min(1.0, index / max(1.0, HIT_ATTACK * rate))
         buf[a + index] += value * attack * gain * (note.volume / 15.0)
         position += step
 
@@ -215,6 +234,7 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
     vibrato = options.vibrato
 
     for note in notes:
+        note_gain = gain * ROLE_GAIN.get(note.role, 0.7)
         a = int(round(note.start * rate))
         b = int(round(note.end() * rate))
         if b <= a or a >= total_samples:
@@ -224,7 +244,7 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
         percussion = note.role == "drum" and spec.kind in ("noise", "dmc")
 
         if percussion and options.sampled_drums:
-            _emit_sample(buf, a, b, note, rate, gain * 1.55)
+            _emit_sample(buf, a, b, note, rate, note_gain * 1.55)
             continue
 
         frequency = note_frequency(note.pitch + note.bend)
@@ -232,22 +252,22 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
             continue
 
         if spec.kind == "pulse":
-            _emit_pulse(buf, a, b, note, rate, gain, vibrato)
+            _emit_pulse(buf, a, b, note, rate, note_gain, vibrato)
         elif spec.kind == "triangle":
-            _emit_steps(buf, a, b, note, TRIANGLE_STEPS, rate, gain, vibrato)
+            _emit_steps(buf, a, b, note, TRIANGLE_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "saw":
-            _emit_steps(buf, a, b, note, SAW_STEPS, rate, gain, vibrato)
+            _emit_steps(buf, a, b, note, SAW_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "fds":
-            _emit_steps(buf, a, b, note, FDS_STEPS, rate, gain, vibrato)
+            _emit_steps(buf, a, b, note, FDS_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "wavetable":
-            _emit_steps(buf, a, b, note, WAVETABLE_STEPS, rate, gain, vibrato)
+            _emit_steps(buf, a, b, note, WAVETABLE_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "psg":
-            _emit_steps(buf, a, b, note, PSG_STEPS, rate, gain, vibrato)
+            _emit_steps(buf, a, b, note, PSG_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "noise":
-            _emit_noise(buf, a, b, note, rate, gain)
+            _emit_noise(buf, a, b, note, rate, note_gain)
         elif spec.kind == "dmc":
             # a melodic note on the delta channel: play the hit's own pitch
-            _emit_sample(buf, a, b, note, rate, gain)
+            _emit_sample(buf, a, b, note, rate, note_gain)
     return buf
 
 

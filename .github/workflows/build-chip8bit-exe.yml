@@ -46,6 +46,10 @@ jobs:
           # asset names on a release must stay boring: no spaces or brackets
           cp "tests/genesis-style [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-all-chips.wav
           cp "tests/genesis-style [nes].wav" demo/demo-bare-nes.wav
+          # a fast one: 226 BPM sixteenths, which used to be dropped as "too short"
+          python -c "from nescore.demo import write_fast; write_fast('tests/fast-tune.mid')"
+          python chip8bit.py --cli tests/fast-tune.mid --extensions all
+          cp "tests/fast-tune [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-fast-tune.wav
           ls -la demo
 
       # Artifacts keep the folder layout of what they upload, and the release job
@@ -54,7 +58,7 @@ jobs:
         working-directory: tools/nes8bit
         run: |
           mkdir -p release_assets
-          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav release_assets/
+          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav demo/demo-fast-tune.wav release_assets/
           cp window-tracker.png window-win95.png window-amiga.png release_assets/
           ls -la release_assets
 
@@ -204,9 +208,12 @@ jobs:
             ```
 
             Sound: drums are real samples through the delta channel, every note has
-            an attack/release so nothing clicks, and when every voice is busy the
-            note is left out and counted — melody, bass and drums get the channels
-            first, and nothing is crammed in as an arpeggio.
+            an attack/release so nothing clicks, and the mix is balanced by role —
+            melody on top, bass under it, the chord bed underneath, drums in front
+            of the bed. When every voice is busy the note is left out and counted;
+            when a full-band MIDI asks for twenty lines at once, the strongest few
+            are kept and the rest are reported as thinned. Nothing is crammed in as
+            an arpeggio.
 
             `demo-*.wav` are the built-in test tune on the bare NES and on the console
             with every extension chip enabled. `window-tracker.png`,
@@ -230,7 +237,7 @@ jobs:
           set -e
           for name in chip8bit.exe chip8bit-cli.exe window-tracker.png \
                       window-win95.png window-amiga.png \
-                      demo-all-chips.wav demo-bare-nes.wav; do
+                      demo-all-chips.wav demo-bare-nes.wav demo-fast-tune.wav; do
             size=$(gh release view chip8bit-latest --json assets \
               --jq ".assets[] | select(.name==\"$name\") | .size")
             if [ -z "$size" ]; then

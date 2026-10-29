@@ -141,9 +141,90 @@ def build() -> bytes:
     return header + tempo.serialize() + track_bytes
 
 
+def build_fast() -> bytes:
+    """A fast tune, the way real game music is written.
+
+    At 226 BPM a sixteenth note is 66 ms and a thirty-second note is 33 ms, which
+    is shorter than the "minimum note" the arranger used to insist on: this file
+    is the regression test for "the tune must survive the tempo". It also has a
+    chord part, a bass and drums, so the channel spreading gets exercised too.
+    """
+    import struct
+
+    division = 480
+    # 226 BPM, the tempo of a certain athletic theme
+    tempo_us = 265487
+
+    def bar(n):
+        return n * division * 4
+
+    tracks = []
+
+    # 1. melody: thirty-second notes, six per beat at this tempo are 33 ms long
+    lead = Track("melody")
+    lead.program(0, 80)
+    lead.control(0, 7, 112)
+    runs = [72, 74, 76, 79, 81, 79, 76, 74, 72, 71, 72, 74]
+    step = division // 8                      # 32nd note
+    for index in range(96):
+        pitch = runs[index % len(runs)] + (12 if index // 24 == 2 else 0)
+        lead.note(0, index * step, step - 8, pitch, 96 + (index % 3) * 6)
+    tracks.append(lead)
+
+    # 2. counter melody: a second line, so the channels have to be shared out
+    counter = Track("counter")
+    counter.program(1, 82)
+    for index in range(48):
+        counter.note(1, index * step * 2, step * 2 - 10,
+                     [60, 64, 67, 64][index % 4], 80)
+    tracks.append(counter)
+
+    # 3. bass line on the triangle
+    bass = Track("bass")
+    bass.program(2, 33)
+    for index in range(24):
+        bass.note(2, index * step * 4, step * 4 - 20,
+                  [36, 36, 33, 33, 29, 29, 31, 31][index % 8], 104)
+    tracks.append(bass)
+
+    # 4. chords: four voices at once, a real chord and not an arpeggio
+    chords = Track("chords")
+    chords.program(3, 89)
+    progression = [(60, 64, 67, 72), (57, 60, 64, 69),
+                   (53, 57, 60, 65), (55, 59, 62, 67)]
+    for index, triad in enumerate(progression * 6):
+        for pitch in triad:
+            chords.note(3, index * step * 4, step * 4 - 30, pitch, 70)
+    tracks.append(chords)
+
+    # 5. drums
+    drums = Track("drums")
+    for index in range(96):
+        tick = index * step
+        if index % 8 == 0:
+            drums.note(9, tick, 40, 36, 120)      # kick
+        if index % 8 == 4:
+            drums.note(9, tick, 40, 38, 108)      # snare
+        drums.note(9, tick, 20, 42, 66 + (index % 2) * 24)   # 20 ms hat
+    tracks.append(drums)
+
+    track_bytes = b"".join(t.serialize() for t in tracks)
+    header = b"MThd" + struct.pack(">IHHH", 6, 1, len(tracks), division)
+    tempo = Track("tempo")
+    tempo.add(0, b"\xFF\x51\x03" + struct.pack(">I", tempo_us)[1:])
+    tempo.add(0, b"\xFF\x58\x04\x04\x02\x18\x08")
+    return header + tempo.serialize() + track_bytes
+
+
 def write(path: str) -> str:
     with open(path, "wb") as handle:
         handle.write(build())
+    return path
+
+
+def write_fast(path: str) -> str:
+    with open(path, "wb") as handle:
+        handle.write(build_fast())
     return path
 
 
