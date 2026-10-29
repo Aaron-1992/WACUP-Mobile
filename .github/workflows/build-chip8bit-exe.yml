@@ -28,7 +28,7 @@ jobs:
         working-directory: tools/nes8bit
         run: python tests/run_tests.py
 
-      - name: Window self test (headless: clicks the chips, converts, plays)
+      - name: Window self test (headless, clicks the chips, converts, plays)
         working-directory: tools/nes8bit
         run: |
           python tests/make_test_midi.py tests/genesis-style.mid
