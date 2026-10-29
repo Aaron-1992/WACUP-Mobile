@@ -45,12 +45,19 @@ jobs:
           cp "tests/genesis-style [nes].wav" demo/demo-bare-nes.wav
           ls -la demo
 
+      # Artifacts keep the folder layout of what they upload, and the release job
+      # needs a flat folder, so stage the files one level deep and upload the glob.
+      - name: Stage the demo assets
+        working-directory: tools/nes8bit
+        run: |
+          mkdir -p release_assets
+          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav window.png release_assets/
+          ls -la release_assets
+
       - uses: actions/upload-artifact@v4
         with:
           name: chip8bit-demo
-          path: |
-            tools/nes8bit/demo/*.wav
-            tools/nes8bit/window.png
+          path: tools/nes8bit/release_assets/*
           if-no-files-found: error
 
   build:
@@ -129,13 +136,17 @@ jobs:
           git pull --rebase origin ${{ github.ref_name }} || true
           git push origin HEAD:${{ github.ref_name }} || true
 
+      - name: Stage the release assets
+        shell: bash
+        run: |
+          mkdir -p release_assets
+          cp dist/chip8bit.exe dist/chip8bit-cli.exe window.png release_assets/
+          ls -la release_assets
+
       - uses: actions/upload-artifact@v4
         with:
           name: chip8bit-windows
-          path: |
-            tools/nes8bit/dist/chip8bit.exe
-            tools/nes8bit/dist/chip8bit-cli.exe
-            tools/nes8bit/window.png
+          path: tools/nes8bit/release_assets/*
           if-no-files-found: error
 
   release:
