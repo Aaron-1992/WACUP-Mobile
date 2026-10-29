@@ -7,6 +7,7 @@ import android.net.Uri;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 
@@ -59,6 +60,8 @@ public final class MusicEngine {
     private final float[] bandGains = new float[BAND_LABELS.length];
     private Equalizer equalizer;
     private int appliedAudioSession = -1;
+    private boolean equalizerAttempted;
+    private String lastError;
     private boolean eqEnabled;
     private int index = -1;
 
@@ -92,6 +95,18 @@ public final class MusicEngine {
             @Override
             public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
                 index = player.getCurrentMediaItemIndex();
+                notifyListeners();
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                lastError = error.getErrorCodeName();
+                // Skip a file the device cannot decode rather than stalling the queue.
+                if (player.hasNextMediaItem()) {
+                    player.seekToNextMediaItem();
+                    player.prepare();
+                    player.play();
+                }
                 notifyListeners();
             }
         });
@@ -147,6 +162,7 @@ public final class MusicEngine {
         } else {
             player.seekToDefaultPosition(newIndex);
         }
+        ensureReady();
         player.play();
         index = newIndex;
         notifyListeners();
@@ -165,6 +181,20 @@ public final class MusicEngine {
     public void togglePlayPause() {
         if (player.isPlaying()) {
             player.pause();
+            notifyListeners();
+            return;
+        }
+        // After stop() (or a playback error) ExoPlayer sits in STATE_IDLE and play()
+        // is a no-op — it has to be prepared again first. This is what made the
+        // player look permanently dead after pressing stop.
+        if (player.getPlaybackState() == Player.STATE_IDLE) {
+            if (player.getMediaItemCount() == 0 && playlist.size() > 0) {
+                setQueue(playlist.tracks, 0);
+                player.play();
+            } else if (player.getMediaItemCount() > 0) {
+                player.prepare();
+                player.play();
+            }
         } else {
             if (player.getMediaItemCount() == 0 && playlist.size() > 0) {
                 setQueue(playlist.tracks, 0);
@@ -174,12 +204,24 @@ public final class MusicEngine {
         notifyListeners();
     }
 
+    /** ExoPlayer needs prepare() again after stop(), an error or a seek past the end. */
+    private void ensureReady() {
+        if (player.getPlaybackState() == Player.STATE_IDLE
+                && player.getMediaItemCount() > 0) {
+            player.prepare();
+        }
+    }
+
     public void stop() {
         player.stop();
+        lastError = null;
+        // Put the player back in a playable state so the play button works again.
+        ensureReady();
         notifyListeners();
     }
 
     public void next() {
+        ensureReady();
         if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem();
             player.play();
@@ -188,6 +230,7 @@ public final class MusicEngine {
     }
 
     public void previous() {
+        ensureReady();
         if (player.hasPreviousMediaItem()) {
             player.seekToPreviousMediaItem();
             player.play();
@@ -347,9 +390,13 @@ public final class MusicEngine {
     }
 
     private void attachEqualizer(int audioSessionId) {
-        if (audioSessionId == appliedAudioSession && equalizer != null) return;
+        // 0 means "no session yet"; attaching there grabs the global mix and on some
+        // devices wedges audio output. Wait for the real session instead.
+        if (audioSessionId == 0) return;
+        if (audioSessionId == appliedAudioSession) return;
         appliedAudioSession = audioSessionId;
         releaseEqualizer();
+        equalizerAttempted = true;
         try {
             equalizer = new Equalizer(0, audioSessionId);
             equalizer.setEnabled(eqEnabled);
@@ -357,8 +404,21 @@ public final class MusicEngine {
                 pushBandToEqualizer(i);
             }
         } catch (Exception e) {
-            equalizer = null;
+            equalizer = null;   // the UI keeps working, only the DSP is missing
         }
+    }
+
+    public boolean equalizerAvailable() {
+        return equalizer != null;
+    }
+
+    @Nullable
+    public String lastError() {
+        return lastError;
+    }
+
+    public void clearError() {
+        lastError = null;
     }
 
     private void releaseEqualizer() {

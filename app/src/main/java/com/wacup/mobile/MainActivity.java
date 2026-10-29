@@ -81,6 +81,7 @@ public class MainActivity extends Activity implements
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        goFullscreen();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             // The same mechanism Google Maps uses: our own window may draw over the
             // keyguard without unlocking the device.
@@ -116,11 +117,44 @@ public class MainActivity extends Activity implements
         startPlaybackService();
     }
 
+    /** No status or navigation bars: the skin gets the whole panel. */
+    private void goFullscreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            android.view.WindowInsetsController controller =
+                    getWindow().getInsetsController();
+            if (controller != null) {
+                controller.hide(android.view.WindowInsets.Type.systemBars());
+                controller.setSystemBarsBehavior(
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
+        goFullscreen();
         ticker.post(tickTask);
         refreshWindows();
+        reportPlaybackError();
+    }
+
+    /** Tells the user which file the device refused, instead of silently stalling. */
+    private void reportPlaybackError() {
+        String error = engine.lastError();
+        if (error != null) {
+            engine.clearError();
+            toast("Cannot play this file (" + error + ") — skipped");
+        }
     }
 
     @Override

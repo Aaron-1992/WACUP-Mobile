@@ -31,7 +31,8 @@ public class DesktopLayout extends ViewGroup {
     private static final String PREFS = "wacup_windows";
     private static final long DOUBLE_TAP_MS = 320L;
     private static final float MIN_SCALE = 0.45f;
-    private static final float MAX_SCALE = 3.2f;
+    private static final float MAX_SCALE = 6f;
+    private static final int MAX_ROWS = 80;
 
     public interface Listener {
         void onTitleTap(int kind);
@@ -180,36 +181,38 @@ public class DesktopLayout extends ViewGroup {
         }
 
         float density = getResources().getDisplayMetrics().density;
-        float pad = 4f * density;
-        int spec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+        float pad = 1f * density;      // fill the screen: only a hairline margin
 
+        int spec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
         PlaylistWindowView playlist = (PlaylistWindowView) windows[PLAYLIST];
+
+        // Height that does not depend on how many rows the playlist shows.
         float fixedSkin = mainHeight()
                 + (shown[EQ] ? eqHeight() : 0f)
-                + (shown[PLAYLIST] ? SkinLayout.PL_TITLE_H + SkinLayout.PL_BOTTOM_H : 0f);
+                + (shown[PLAYLIST]
+                        ? SkinLayout.PL_TITLE_H + SkinLayout.PL_BOTTOM_H
+                          + 2 * SkinLayout.PL_TEXT_PAD_TOP
+                        : 0f);
 
-        // Start from the largest scale the width allows, then give the playlist
-        // whatever vertical room is left over.
-        float candidate = Math.min((width - 2 * pad) / (float) SkinLayout.PL_W,
-                MAX_SCALE);
-        if (candidate < MIN_SCALE) candidate = MIN_SCALE;
+        // Fill the width first, then let the playlist absorb the leftover height.
+        float widthFit = (width - 2 * pad) / (float) SkinLayout.PL_W;
+        scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, widthFit));
 
-        float availableSkin = (height - 2 * pad) / candidate;
-        int rows = 3;
+        int rows = SkinLayout.PL_MIN_ROWS;
         if (shown[PLAYLIST]) {
-            rows = (int) Math.floor((availableSkin - fixedSkin) / SkinLayout.PL_ROW_H);
-            rows = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(24, rows));
-        }
-        float stackSkin = fixedSkin + (shown[PLAYLIST] ? rows * SkinLayout.PL_ROW_H : 0f);
+            float roomSkin = (height - 2 * pad) / scale - fixedSkin;
+            rows = (int) Math.floor(roomSkin / SkinLayout.PL_ROW_H);
+            rows = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(MAX_ROWS, rows));
 
-        float fitH = (height - 2 * pad) / stackSkin;
-        scale = Math.max(MIN_SCALE, Math.min(candidate, fitH));
-
-        // Recompute rows now that the scale is final, so the stack exactly fits.
-        availableSkin = (height - 2 * pad) / scale;
-        if (shown[PLAYLIST]) {
-            rows = (int) Math.floor((availableSkin - fixedSkin) / SkinLayout.PL_ROW_H);
-            rows = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(24, rows));
+            // If even the minimum number of rows will not fit, shrink the scale.
+            float neededSkin = fixedSkin + SkinLayout.PL_MIN_ROWS * SkinLayout.PL_ROW_H;
+            float heightFit = (height - 2 * pad) / neededSkin;
+            if (heightFit < scale) {
+                scale = Math.max(MIN_SCALE, heightFit);
+                roomSkin = (height - 2 * pad) / scale - fixedSkin;
+                rows = (int) Math.floor(roomSkin / SkinLayout.PL_ROW_H);
+                rows = Math.max(SkinLayout.PL_MIN_ROWS, Math.min(MAX_ROWS, rows));
+            }
             playlist.setVisibleRows(rows);
         }
 
@@ -224,7 +227,11 @@ public class DesktopLayout extends ViewGroup {
 
         contentLeft = (width - SkinLayout.PL_W * scale) / 2f;
         float stackPixels = stackH * scale;
-        contentTop = Math.max(pad, (height - stackPixels) / 2f);
+        // Fill from the top when the stack is taller than the screen, otherwise
+        // centre it vertically.
+        contentTop = stackPixels > height - pad
+                ? pad
+                : Math.max(pad, (height - stackPixels) / 2f);
 
         if (autoFit) {
             posX[MAIN] = 0;

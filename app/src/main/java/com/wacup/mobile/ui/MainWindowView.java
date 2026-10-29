@@ -39,7 +39,12 @@ public class MainWindowView extends SkinSurface {
     private final MusicEngine engine;
     private Callbacks callbacks;
 
-    private int pressedButton = -1;          // transport 0..5, 10+shuffle/repeat/eq/pl
+    private static final int PRESS_SHUFFLE = 10;
+    private static final int PRESS_REPEAT = 11;
+    private static final int PRESS_EQ = 12;
+    private static final int PRESS_PL = 13;
+
+    private int pressedButton = -1;          // transport 0..5, or PRESS_* above
     private int pressedTitle = -1;
     private int draggedSlider = -1;          // 0 seek, 1 volume, 2 balance
     private boolean shaded;
@@ -183,7 +188,9 @@ public class MainWindowView extends SkinSurface {
 
     private void drawIndicators(Canvas c) {
         if (skin.playpaus != null) {
-            int state = engine.isPlaying() ? 0 : (engine.player().isLoading() ? 1 : 2);
+            int state = engine.isPlaying() ? 0
+                    : (engine.player().getPlaybackState() == androidx.media3.common.Player.STATE_BUFFERING
+                        ? 1 : 2);
             SkinPaint.sprite(c, skin.playpaus, state * 9, 0, 9, 9,
                     SkinLayout.PLAYPAUS_X, SkinLayout.PLAYPAUS_Y, plain);
         }
@@ -259,9 +266,14 @@ public class MainWindowView extends SkinSurface {
 
     private void drawWindowButtons(Canvas c) {
         if (skin.shufrep == null) return;
-        SkinPaint.sprite(c, skin.shufrep, 0, eqOpen ? 73 : 61, SkinLayout.WINDOW_BUTTON_W,
+        int eqRow = eqOpen ? 73 : 61;
+        int plRow = plOpen ? 73 : 61;
+        // shufrep.bmp keeps the pressed variants of these two at x = 46 and 69.
+        int eqX = pressedButton == PRESS_EQ ? 46 : 0;
+        int plX = pressedButton == PRESS_PL ? 69 : 23;
+        SkinPaint.sprite(c, skin.shufrep, eqX, eqRow, SkinLayout.WINDOW_BUTTON_W,
                 SkinLayout.WINDOW_BUTTON_H, SkinLayout.EQ_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y, plain);
-        SkinPaint.sprite(c, skin.shufrep, 23, plOpen ? 73 : 61, SkinLayout.WINDOW_BUTTON_W,
+        SkinPaint.sprite(c, skin.shufrep, plX, plRow, SkinLayout.WINDOW_BUTTON_W,
                 SkinLayout.WINDOW_BUTTON_H, SkinLayout.PL_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y, plain);
     }
 
@@ -291,12 +303,12 @@ public class MainWindowView extends SkinSurface {
         if (skin.shufrep == null) return;
 
         int shuffleRow = engine.shuffle() ? 30 : 0;
-        if (pressedButton == 10) shuffleRow += 15;
+        if (pressedButton == PRESS_SHUFFLE) shuffleRow += 15;
         SkinPaint.sprite(c, skin.shufrep, 28, shuffleRow, SkinLayout.SHUFFLE_W,
                 SkinLayout.SHUFREP_H, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y, plain);
 
         int repeatRow = engine.repeatMode() == 0 ? 0 : 30;
-        if (pressedButton == 11) repeatRow += 15;
+        if (pressedButton == PRESS_REPEAT) repeatRow += 15;
         SkinPaint.sprite(c, skin.shufrep, 0, repeatRow, SkinLayout.REPEAT_W,
                 SkinLayout.SHUFREP_H, SkinLayout.REPEAT_X, SkinLayout.SHUFFLE_Y, plain);
     }
@@ -417,6 +429,11 @@ public class MainWindowView extends SkinSurface {
                     invalidate();
                     return true;
                 }
+                pressedButton = toggleAt(x, y);
+                if (pressedButton >= 0) {
+                    invalidate();
+                    return true;
+                }
                 if (inside(x, y, SkinLayout.POSBAR_X, SkinLayout.POSBAR_Y,
                         SkinLayout.POSBAR_W, SkinLayout.POSBAR_H)) {
                     draggedSlider = 0;
@@ -474,11 +491,12 @@ public class MainWindowView extends SkinSurface {
                     int button = pressedButton;
                     pressedButton = -1;
                     invalidate();
-                    if (shaded) {
-                        dispatchTransport(button);
+                    // Only act if the finger is still over the control it started on.
+                    if (button >= PRESS_SHUFFLE) {
+                        if (toggleAt(x, y) == button) dispatchToggle(button);
                         return true;
                     }
-                    dispatchTransport(button);
+                    if (transportAt(x, y) == button) dispatchTransport(button);
                     return true;
                 }
                 if (tapButtons(x, y)) return true;
@@ -494,6 +512,19 @@ public class MainWindowView extends SkinSurface {
             default:
                 return super.onTouchEvent(event);
         }
+    }
+
+    /** Which small toggle (if any) is under the finger. */
+    private int toggleAt(float x, float y) {
+        if (inside(x, y, SkinLayout.SHUFFLE_X, SkinLayout.SHUFFLE_Y,
+                SkinLayout.SHUFFLE_W, SkinLayout.SHUFREP_H)) return PRESS_SHUFFLE;
+        if (inside(x, y, SkinLayout.REPEAT_X, SkinLayout.SHUFFLE_Y,
+                SkinLayout.REPEAT_W, SkinLayout.SHUFREP_H)) return PRESS_REPEAT;
+        if (inside(x, y, SkinLayout.EQ_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y,
+                SkinLayout.WINDOW_BUTTON_W, SkinLayout.WINDOW_BUTTON_H)) return PRESS_EQ;
+        if (inside(x, y, SkinLayout.PL_BUTTON_X, SkinLayout.WINDOW_BUTTON_Y,
+                SkinLayout.WINDOW_BUTTON_W, SkinLayout.WINDOW_BUTTON_H)) return PRESS_PL;
+        return -1;
     }
 
     /** Taps on shuffle / repeat / eq / playlist, resolved on release. */
@@ -527,6 +558,16 @@ public class MainWindowView extends SkinSurface {
         callbacks.onTransport(button);
     }
 
+    private void dispatchToggle(int toggle) {
+        if (callbacks == null) return;
+        switch (toggle) {
+            case PRESS_SHUFFLE: callbacks.onShuffle(); break;
+            case PRESS_REPEAT: callbacks.onRepeat(); break;
+            case PRESS_EQ: callbacks.onToggleEqWindow(); break;
+            default: callbacks.onTogglePlaylistWindow(); break;
+        }
+    }
+
     private int titleButtonAt(float x, float y) {
         if (y > SkinLayout.TITLE_H) return -1;
         if (near(x, SkinLayout.OPTIONS_X)) return TITLE_OPTIONS;
@@ -543,9 +584,9 @@ public class MainWindowView extends SkinSurface {
                 SkinLayout.EJECT_W);
         float ty = shaded ? SkinLayout.SHADE_BUTTON_Y : SkinLayout.CBUTTONS_Y;
         float th = shaded ? SkinLayout.SHADE_BUTTON_H : SkinLayout.CBUTTONS_H;
-        if (y < ty - 4 || y > ty + th + 4) return -1;
+        if (y < ty || y > ty + th) return -1;
         for (int i = 0; i < xs.length; i++) {
-            if (x >= xs[i] - 2 && x <= xs[i] + ws[i] + 2) {
+            if (x >= xs[i] && x < xs[i] + ws[i]) {
                 return i == 5 ? SkinLayout.EJECT : i;
             }
         }
