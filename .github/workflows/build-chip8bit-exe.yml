@@ -159,7 +159,12 @@ jobs:
       - name: Remove the old release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete chip8bit-latest --cleanup-tag --yes || true
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # the release job has no checkout, so gh needs the repo spelled out
+          if gh release view chip8bit-latest >/dev/null 2>&1; then
+            gh release delete chip8bit-latest --cleanup-tag --yes
+          fi
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -195,3 +200,26 @@ jobs:
             dist/window.png
           prerelease: true
           make_latest: false
+
+      # and prove the download really is this build, not a stale asset
+      - name: Verify the release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          for name in chip8bit.exe chip8bit-cli.exe window.png \
+                      demo-all-chips.wav demo-bare-nes.wav; do
+            size=$(gh release view chip8bit-latest --json assets \
+              --jq ".assets[] | select(.name==\"$name\") | .size")
+            if [ -z "$size" ]; then
+              echo "missing asset: $name"; exit 1
+            fi
+            echo "$name: $size bytes"
+          done
+          wav=$(gh release view chip8bit-latest --json assets \
+            --jq '.assets[] | select(.name=="demo-all-chips.wav") | .size')
+          if [ "$wav" -lt 500000 ]; then
+            echo "the demo wav is the old 8-bit file; the release did not refresh"
+            exit 1
+          fi
