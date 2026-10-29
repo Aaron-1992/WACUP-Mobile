@@ -221,9 +221,9 @@ settles, and anything sustained gets a little delayed vibrato the way a player's
 | pulses | 12.5/25/50/75 % duty chosen from the instrument *and* the register — thin on top so high notes are not sirens, wide at the bottom for body |
 | triangle | the real 32-step staircase, no volume control (that is the point) |
 | VRC6 / MMC5 / FDS / N163 / PSG | sawtooth, extra pulses, and wavetables, each rendered the way its chip does it |
-| echo | a tempo-aware delayed copy (two rows of the song's own grid, 13 % mix, two taps) — the "second pulse" trick, because the console had no reverb |
+| echo | **off by default** (`--echo` turns it on): a quiet tempo-aware delayed copy, two rows of the song's own grid at 7 % — the "second pulse" trick. It is a taste, and at 13 % it was too much of one |
 | master | gentle low-pass, DC blocker, light bus compression, the APU's non-linear mixer curve, then an adaptive peak limiter (0.72 of full scale on a sparse tune, backing off on a dense one) so the drums keep their punch without the whole mix being turned down for them |
-| result | 226 BPM full-band test tune: RMS 0.209 (was 0.198), quiet windows 0 of 3057 (was 15), short-term level spread 4.9 dB (was 6.8), and no voice more than 7 dB off its role |
+| result | 226 BPM full-band test tune: RMS 0.208 (was 0.198), short-term level spread 5.0 dB (was 6.8), no voice more than 7 dB off its role, and the true rests between phrases stay silent instead of being smeared over |
 
 Samples are shipped as rendered audio, so there is no sample library to install —
 and no copyrighted sample data anywhere: the kit is maths.

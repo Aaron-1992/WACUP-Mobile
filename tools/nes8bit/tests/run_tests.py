@@ -350,10 +350,11 @@ def main_test() -> None:
     peak = max(abs(v - 128) for v in demo_pcm) if demo_pcm else 0
     check("nothing clips", peak <= 128, str(peak))
     check("there is signal", peak > 20, str(peak))
+    check("no echo unless it is asked for", demo_pcm == render(
+        all_notes, all_channels, RenderOptions(rate=44100), {})[0])
     with_echo = render(all_notes, all_channels,
-                       RenderOptions(rate=44100, echo=False), {})[0]
-    check("the effect chain can be switched off",
-          with_echo != demo_pcm)
+                       RenderOptions(rate=44100, echo=True), {})[0]
+    check("the echo can be asked for", with_echo != demo_pcm)
     again = render(all_notes, all_channels, RenderOptions(rate=44100), {})[0]
     check("the same input renders the same bytes", again == demo_pcm)
 

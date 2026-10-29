@@ -38,8 +38,8 @@ MAX_CORRECTION = 14.0      # never let the equaliser rewrite the arrangement
 STRIDE = 8                 # loudness is measured on every 8th sample: fast, exact enough
 
 ECHO_DELAY = 0.105         # seconds; roughly the "second pulse" trick
-ECHO_FEEDBACK = 0.30
-ECHO_MIX = 0.13
+ECHO_FEEDBACK = 0.22
+ECHO_MIX = 0.07             # quiet enough to be air; off entirely unless asked for
 
 
 def _active_level(buffer: List[float]) -> float:

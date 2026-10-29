@@ -29,7 +29,7 @@ class Settings:
     export_vgm: bool = False
     gain: float = 0.9
     equalise: bool = True          # balance the voices against each other
-    echo: bool = True              # the NES "second pulse" delay
+    echo: bool = False             # the NES "second pulse" delay, opt-in
     limit: bool = True             # peak limiting instead of turning everything down
     compress: bool = True          # gentle master compression
 

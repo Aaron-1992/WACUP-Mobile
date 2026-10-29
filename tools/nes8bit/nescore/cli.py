@@ -118,7 +118,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
         nonlinear=not args.linear,
         max_seconds=args.max_seconds,
         equalise=not args.no_balance,
-        echo=not args.no_echo,
+        echo=bool(args.echo),
         limit=not args.no_limit,
         compress=not args.no_compress,
     )
@@ -186,8 +186,8 @@ def main(argv=None) -> int:
     parser.add_argument("--linear", action="store_true", help="skip the NES mixer curve")
     parser.add_argument("--no-balance", action="store_true",
                         help="do not level the voices against each other")
-    parser.add_argument("--no-echo", action="store_true",
-                        help="no NES-style echo on the mix")
+    parser.add_argument("--echo", action="store_true",
+                        help="add a quiet tempo-aware echo (off by default)")
     parser.add_argument("--no-limit", action="store_true",
                         help="no peak limiting on the master")
     parser.add_argument("--no-compress", action="store_true",

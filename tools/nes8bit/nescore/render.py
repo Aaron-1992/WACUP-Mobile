@@ -71,7 +71,7 @@ class RenderOptions:
     sampled_drums: bool = True
     lowpass: bool = True
     equalise: bool = True       # put every voice at its role's level
-    echo: bool = True           # the "second pulse" trick NES composers used
+    echo: bool = False          # off by default: it is a taste, not a default
     limit: bool = True          # tame the transients instead of the whole mix
     compress: bool = True       # gentle bus compression: even, not squashed
 
