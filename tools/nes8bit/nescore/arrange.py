@@ -50,7 +50,15 @@ class Options:
     max_notes_per_channel: int = 0    # 0 = unlimited
     quantize: bool = True
     min_duration: float = 0.03
-    quietest: int = 6             # drop notes quieter than this velocity
+    quietest: int = 7             # drop notes quieter than this velocity
+
+    # A chip channel is monophonic: pretending otherwise is what makes converted
+    # music sound like a wasp in a jar. Sharing is therefore strictly rationed.
+    dedupe: bool = True               # drop notes that double another part exactly
+    max_cluster_notes: int = 3        # never arpeggiate more than a triad
+    min_cluster_seconds: float = 0.12  # short blips are not worth splitting
+    share_budget: float = 0.10        # at most this share of the notes may share
+    keep_second_voice: bool = True    # keep a real second note rather than arp
 
 
 @dataclass
@@ -59,6 +67,8 @@ class Stats:
     overflow: int = 0             # landed on another kind because it was free
     shared: int = 0               # had to share a channel as an arpeggio
     dropped: int = 0              # too short / too quiet / unplaceable
+    simplified: int = 0           # left out on purpose so the mix stays clean
+    deduped: int = 0              # doubled another part note for note
     channels_used: Dict[str, int] = field(default_factory=dict)
     per_channel_notes: Dict[str, int] = field(default_factory=dict)
     clusters: int = 0
@@ -68,6 +78,8 @@ class Stats:
             "  notes placed directly on a suited channel : %d" % self.direct,
             "  notes re-homed onto a free spare channel   : %d" % self.overflow,
             "  notes merged into arpeggio clusters        : %d" % self.shared,
+            "  notes deliberately thinned for clarity     : %d" % self.simplified,
+            "  doubled notes folded into one              : %d" % self.deduped,
             "  notes dropped (too short/quiet)            : %d" % self.dropped,
             "  channel-sharing clusters                   : %d" % self.clusters,
             "  voices used                                : %d" % len(self.per_channel_notes),
@@ -201,7 +213,14 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
     clusters: List[_Cluster] = []
     placed: List[Note] = []
 
-    for note in sorted(song.notes, key=lambda n: (n.start, -n.pitch)):
+    # Work on copies: one song object can be arranged several ways in a session
+    # (bare NES, then every extension), and the caller's notes must stay untouched.
+    source_notes = [note.copy() for note in song.notes]
+    if options.dedupe:
+        source_notes = _dedupe(source_notes, stats)
+    share_budget = int(len(source_notes) * max(0.0, options.share_budget))
+
+    for note in sorted(source_notes, key=lambda n: (n.start, -n.pitch)):
         if note.dur < options.min_duration or note.velocity < options.quietest:
             stats.dropped += 1
             continue
@@ -247,37 +266,27 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
                 if chosen:
                     break
 
-        # 3) still nothing: borrow a channel and arpeggiate
-        if chosen is None and options.allow_sharing:
-            candidates = []
-            for kind in wanted_kinds + sorted(MELODIC_KINDS):
-                for state in by_kind.get(kind, []):
-                    conflicts = state.conflicts(note.start, note.end())
-                    if conflicts:
-                        candidates.append((len(conflicts), state.spec.priority, state,
-                                           conflicts))
-            if candidates:
-                candidates.sort(key=lambda item: (item[0], item[1]))
-                _, _, state, conflicts = candidates[0]
-                chosen = state
-                existing = next((entry for entry in conflicts if entry["cluster"]), None)
-                if existing is not None:
-                    cluster = existing["cluster"]
-                else:
-                    victim = conflicts[0]["note"]
-                    cluster = _Cluster(state.spec.id, victim.start, victim.end())
-                    cluster.add(victim)
-                    for entry in conflicts:
-                        if entry["note"] is victim:
-                            entry["cluster"] = cluster
-                    clusters.append(cluster)
-                cluster.add(note)
-                state.active.append({"note": note, "cluster": cluster})
+        # 2b) drums get first call: a snare may cut a hi-hat short, because a
+        #     missing backbeat is far more noticeable than a clipped hat.
+        if chosen is None and drum:
+            chosen = _steal_for_drum(note, by_kind)
+
+        # 3) nothing free: share a channel only when the result will actually
+        #    sound like a chord and the console is not already chattering on it.
+        if chosen is None and options.allow_sharing and \
+                stats.shared < share_budget:
+            cluster = _try_share(note, by_kind, wanted_kinds, options,
+                                 clusters)
+            if cluster is not None:
                 stats.shared += 1
                 continue
 
         if chosen is None:
-            stats.dropped += 1
+            # Leaving a note out is usually better than mangling the part.
+            if note.role == "harmony":
+                stats.simplified += 1
+            else:
+                stats.dropped += 1
             continue
 
         note.channel = chosen.spec.id
@@ -305,6 +314,129 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options):
         stats.per_channel_notes[note.channel] = \
             stats.per_channel_notes.get(note.channel, 0) + 1
     return notes_out, stats
+
+
+# Songs where every part plays the same pitch in unison are common (a doubled
+# lead, or a MIDI export of a stereo patch). A console cannot chorus, and the
+# duplicate only makes the mix louder and muddier, so one copy goes.
+_ROLE_RANK = {"melody": 3, "bass": 3, "drum": 3, "harmony": 1}
+
+
+def _rank(note: Note) -> int:
+    return _ROLE_RANK.get(note.role, 1)
+
+
+def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
+    kept: List[Note] = []
+    for note in sorted(notes, key=lambda n: (n.start, -_rank(n), -n.velocity)):
+        duplicate = None
+        for other in kept:
+            if other.pitch != note.pitch:
+                continue
+            if abs(other.start - note.start) > 0.04:
+                continue
+            overlap = min(other.end(), note.end()) - max(other.start, note.start)
+            if overlap > 0.5 * min(other.dur, note.dur):
+                duplicate = other
+                break
+        if duplicate is None:
+            kept.append(note)
+        else:
+            stats.deduped += 1
+            duplicate.velocity = max(duplicate.velocity, note.velocity)
+    return kept
+
+
+_DRUM_RANK = {"kick": 5, "clap": 4, "snare": 4, "tom": 3, "crash": 2, "hat": 1}
+
+
+def _steal_for_drum(note: Note, by_kind):
+    """Take a percussion channel from a less important hit.
+
+    On real NES soundtracks the drummer does exactly this: the kick and snare
+    land, and the hats get out of the way.
+    """
+    rank = _DRUM_RANK.get(note.drum, 3)
+    best = None
+    for kind in ("noise", "dmc"):
+        for state in by_kind.get(kind, []):
+            active = [entry for entry in state.active
+                      if entry["cluster"] is None and entry["note"].end() > note.start]
+            if not active:
+                continue
+            weakest = min(active, key=lambda entry: _DRUM_RANK.get(entry["note"].drum, 3))
+            weakest_rank = _DRUM_RANK.get(weakest["note"].drum, 3)
+            if weakest_rank >= rank:
+                continue
+            score = (weakest_rank, len(active))
+            if best is None or score < best[0]:
+                best = (score, state, active)
+    if best is None:
+        return None
+    _, state, active = best
+    for entry in active:
+        other = entry["note"]
+        if other.end() > note.start:
+            other.dur = max(0.02, note.start - other.start)
+    state.prune(note.start)
+    return state
+
+
+def _try_share(note: Note, by_kind, wanted_kinds, options: Options,
+               clusters):
+    """Fold a note into a channel that is already playing, as an arpeggio.
+
+    Returns the cluster when it is worth doing, or None when it is not. The rules
+    are the ones that separate "sounds like a chord" from "sounds broken":
+
+    * only two or three different pitches may share a channel;
+    * every note involved has to last long enough for a full cycle;
+    * the notes must overlap for a real stretch of time, not for one frame;
+    * the tune must not be all sharing.
+    """
+    step = max(1, options.arp_frames) / options.fps
+    best = None
+    for kind in wanted_kinds + sorted(MELODIC_KINDS):
+        for state in by_kind.get(kind, []):
+            conflicts = state.conflicts(note.start, note.end())
+            if not conflicts:
+                continue
+            if best is None or len(conflicts) < len(best[1]):
+                best = (state, conflicts)
+    if best is None:
+        return None
+
+    state, conflicts = best
+    existing = next((entry for entry in conflicts if entry["cluster"]), None)
+    cluster = existing["cluster"] if existing is not None else None
+
+    pitches = {n.pitch for n in (cluster.notes if cluster else [])}
+    pitches.add(note.pitch)
+    for entry in conflicts:
+        if cluster is None or entry["note"] not in cluster.notes:
+            pitches.add(entry["note"].pitch)
+    if len(pitches) < 2 or len(pitches) > options.max_cluster_notes:
+        return None            # nothing gained, or a chord that would smear
+
+    span_start = min([note.start] + [c["note"].start for c in conflicts])
+    span_end = max([note.end()] + [c["note"].end() for c in conflicts])
+    if span_end - span_start < options.min_cluster_seconds:
+        return None
+    if span_end - span_start < 3 * step:
+        return None
+
+    if cluster is None:
+        victim = conflicts[0]["note"]
+        cluster = _Cluster(state.spec.id, victim.start, victim.end())
+        cluster.add(victim)
+        for entry in conflicts:
+            if entry["note"] is victim:
+                entry["cluster"] = cluster
+        clusters.append(cluster)
+
+    cluster.add(note)
+    state.active.append({"note": note, "cluster": cluster})
+    return cluster
 
 
 def _drum_kind(pitch: int) -> str:
@@ -347,8 +479,12 @@ def _expand_clusters(clusters: List[_Cluster], states: Dict[str, _ChannelState],
             if note.pitch not in pitches:
                 pitches.append(note.pitch)
         if len(pitches) < 2:
-            # Not actually a chord: keep the strongest note.
+            # Not actually a chord: keep the strongest note on the channel.
             best = max(cluster.notes, key=lambda n: n.velocity)
+            if not best.channel:
+                best.channel = cluster.channel
+                best.volume = _velocity_to_level(best.velocity, best.role)
+                best.duty = _duty_for(best)
             out.append(best)
             continue
         loudest = max(cluster.notes, key=lambda n: n.velocity)

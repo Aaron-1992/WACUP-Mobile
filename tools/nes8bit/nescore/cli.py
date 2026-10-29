@@ -101,6 +101,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
 
     options = Options(
         allow_sharing=not args.no_sharing,
+        dedupe=not args.no_dedupe,
         arp_frames=args.arp_frames,
         quantize=not args.no_quantize,
         min_duration=args.min_note,
@@ -172,13 +173,17 @@ def main(argv=None) -> int:
     parser.add_argument("--stems", dest="stems_dir", default="",
                         help="write one WAV per console channel into this folder")
     parser.add_argument("--rate", type=int, default=44100, help="sample rate (default 44100)")
-    parser.add_argument("--bits", type=int, choices=(8, 16), default=8,
-                        help="bit depth of the WAV (default 8, which is the point)")
+    parser.add_argument("--bits", type=int, choices=(8, 16), default=16,
+                        help="bit depth of the WAV (default 16; 8 for the crunch)")
     parser.add_argument("--stereo", action="store_true", help="duplicate to two channels")
     parser.add_argument("--gain", type=float, default=0.9, help="headroom, 0.1-1.0")
     parser.add_argument("--linear", action="store_true", help="skip the NES mixer curve")
     parser.add_argument("--no-sharing", action="store_true",
                         help="never split a held note into an arpeggio")
+    parser.add_argument("--no-drums", action="store_true",
+                        help="use the noise channel instead of sampled drum hits")
+    parser.add_argument("--no-dedupe", action="store_true",
+                        help="keep pairs of parts that double each other exactly")
     parser.add_argument("--no-quantize", action="store_true",
                         help="keep original timing instead of snapping to NES frames")
     parser.add_argument("--arp-frames", type=int, default=2,

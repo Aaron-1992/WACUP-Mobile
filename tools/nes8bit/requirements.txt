@@ -1,0 +1,2 @@
+# The window needs exactly one dependency; the converter itself is standard library.
+pygame>=2.5.0

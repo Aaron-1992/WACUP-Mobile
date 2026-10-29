@@ -65,18 +65,29 @@ def main_test() -> None:
     print("arranging on a bare NES (4 voices)")
     base_channels = chips.build_channel_set([])
     base_notes, base_stats = arrange(song, base_channels, Options())
-    check("everything placed or shared on 4 channels",
-          base_stats.dropped == 0, "%d dropped" % base_stats.dropped)
-    check("channel sharing happened", base_stats.clusters > 0)
+    check("every note landed on a channel",
+          all(n.channel for n in base_notes) and base_notes)
+    check("the 4-voice console was actually used",
+          len(base_stats.per_channel_notes) == 4,
+          str(sorted(base_stats.per_channel_notes)))
+    check("sharing stayed a small fraction of the song",
+          base_stats.shared < 0.25 * max(1, len(base_notes)),
+          "%d of %d" % (base_stats.shared, len(base_notes)))
     check("noise channel kept the drums",
           any(n.channel == "noise" for n in base_notes))
+    check("duplicated parts were folded together", base_stats.deduped > 0,
+          str(base_stats.deduped))
 
     print("arranging on a fully extended console")
     for extensions in (["vrc6"], ["vrc6", "mmc5"], ["all"]):
         names = list(chips.EXTENSION_CHANNELS) if extensions == ["all"] else extensions
         channel_set = chips.build_channel_set(names)
         notes, stats = arrange(song, channel_set, Options())
-        check("%s: nothing dropped" % "+".join(names), stats.dropped == 0)
+        check("%s: sharing is rare" % "+".join(names),
+              stats.shared <= 0.12 * max(1, len(notes)),
+              "%d of %d" % (stats.shared, len(notes)))
+        check("%s: every note landed on a channel" % "+".join(names),
+              all(n.channel for n in notes))
         check("%s: more voices than the base console (%d)" % ("+".join(names),
                                                               len(stats.per_channel_notes)),
               len(stats.per_channel_notes) > 4)
@@ -84,9 +95,11 @@ def main_test() -> None:
             all_notes, all_stats = notes, stats
             all_channels = channel_set
 
-    check("more extensions => less forced sharing",
-          all_stats.shared <= base_stats.shared,
-          "%d vs %d" % (all_stats.shared, base_stats.shared))
+    check("with every chip the tune needs no sharing at all",
+          all_stats.shared == 0, str(all_stats.shared))
+    check("with every chip nothing is thrown away",
+          all_stats.dropped == 0 and all_stats.simplified == 0,
+          "dropped %d, thinned %d" % (all_stats.dropped, all_stats.simplified))
 
     print("rendering")
     grouped = {}
@@ -101,9 +114,9 @@ def main_test() -> None:
     wav_path = os.path.join(work, "out.wav")
     write_wav(wav_path, pcm, RenderOptions())
     with wave.open(wav_path, "rb") as handle:
-        check("wav is 8-bit mono 44.1k",
+        check("wav is 16-bit mono 44.1k",
               (handle.getsampwidth(), handle.getnchannels(), handle.getframerate())
-              == (1, 1, 44100))
+              == (2, 1, 44100))
         check("wav has the expected length",
               abs(handle.getnframes() / 44100.0 - duration) < 0.1)
 

@@ -20,21 +20,26 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install the window's one dependency
+        working-directory: tools/nes8bit
+        run: python -m pip install --upgrade pip -r requirements.txt
+
       - name: Pipeline self test
         working-directory: tools/nes8bit
         run: python tests/run_tests.py
 
-      - name: GUI self test (starts the window server and drives it over HTTP)
+      - name: Window self test (headless: clicks the chips, converts, plays)
         working-directory: tools/nes8bit
-        run: python chip8bit.py --selftest
+        run: |
+          python tests/make_test_midi.py tests/genesis-style.mid
+          python chip8bit.py --selftest --screenshot window.png
 
       - name: Demo renders (all chips, and bare NES)
         working-directory: tools/nes8bit
         run: |
           mkdir -p demo
-          python tests/make_test_midi.py tests/genesis-style.mid
-          python chip8bit.py tests/genesis-style.mid --extensions all --stats
-          python chip8bit.py tests/genesis-style.mid
+          python chip8bit.py --cli tests/genesis-style.mid --extensions all --stats
+          python chip8bit.py --cli tests/genesis-style.mid
           # asset names on a release must stay boring: no spaces or brackets
           cp "tests/genesis-style [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-all-chips.wav
           cp "tests/genesis-style [nes].wav" demo/demo-bare-nes.wav
@@ -43,7 +48,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: chip8bit-demo
-          path: tools/nes8bit/demo/*.wav
+          path: |
+            tools/nes8bit/demo/*.wav
+            tools/nes8bit/window.png
           if-no-files-found: error
 
   build:
@@ -57,18 +64,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements.txt pyinstaller
 
       # Two builds from one source: the window everyone double-clicks, and a
       # console build for scripts and batch conversion.
-      - name: Build chip8bit.exe (GUI window)
+      - name: Build chip8bit.exe (app window)
         shell: pwsh
         run: |
           python -m PyInstaller --onefile --windowed --name chip8bit --clean `
             --hidden-import nescore.importers.midi `
             --hidden-import nescore.importers.vgm `
             --hidden-import nescore.importers.gym `
+            --hidden-import nescore.app `
             chip8bit.py 2>&1 | Tee-Object -FilePath build.log
 
       - name: Build chip8bit-cli.exe (console)
@@ -85,21 +93,21 @@ jobs:
         run: |
           python tests/make_test_midi.py tests/genesis-style.mid
 
-          # the windowed GUI build: a headless run that starts the window server,
-          # converts the demo tune and quits (exit code is the verdict)
-          $gui = Start-Process -FilePath ".\dist\chip8bit.exe" -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
-          "gui selftest exit: $($gui.ExitCode)"
-          if (Test-Path .\dist\chip8bit.log) { Get-Content .\dist\chip8bit.log }
+          # the windowed build, headless: it must open, convert the demo tune and
+          # write a screenshot, or the exit code fails the build
+          $gui = Start-Process -FilePath ".\dist\chip8bit.exe" `
+            -ArgumentList "--selftest", "--screenshot", "window.png" -Wait -PassThru -NoNewWindow
+          "window selftest exit: $($gui.ExitCode)"
+          if (Test-Path .\window.png) { Get-Item .\window.png | Format-Table Name, Length }
           if ($gui.ExitCode -ne 0) { throw "chip8bit.exe --selftest exited $($gui.ExitCode)" }
+          if (-not (Test-Path .\window.png)) { throw "the window never drew a frame" }
 
-          # the console build still has to do the classic command line job
-          $out = & ".\dist\chip8bit-cli.exe" tests\genesis-style.mid --extensions all --stats 2>&1 | Out-String
+          # the console build still does the classic command line job
+          $out = & ".\dist\chip8bit-cli.exe" --cli tests\genesis-style.mid --extensions all --stats 2>&1 | Out-String
           $out | Tee-Object -FilePath smoke.log
           if ($LASTEXITCODE -ne 0) { throw "chip8bit-cli.exe exited $LASTEXITCODE" }
           if (-not $out.Contains("notes placed")) { throw "no arrangement stats in the output" }
-          $wavs = Get-ChildItem tests\*.wav
-          if ($wavs.Count -lt 1) { throw "no wav written" }
-          $wavs | Format-Table Name, Length
+          Get-ChildItem tests\*.wav | Format-Table Name, Length
           Get-ChildItem dist | Format-Table Name, Length
 
       # Actions logs redirect to hosts that are sometimes unreachable, so a
@@ -110,7 +118,7 @@ jobs:
         run: |
           mkdir -p ci
           for file in tools/nes8bit/build.log tools/nes8bit/build-cli.log \
-                      tools/nes8bit/smoke.log tools/nes8bit/dist/chip8bit.log; do
+                      tools/nes8bit/smoke.log; do
             echo "=== $file" >> ci/chip8bit-last-failure.log
             cat "$file" >> ci/chip8bit-last-failure.log 2>/dev/null || true
           done
@@ -127,6 +135,7 @@ jobs:
           path: |
             tools/nes8bit/dist/chip8bit.exe
             tools/nes8bit/dist/chip8bit-cli.exe
+            tools/nes8bit/window.png
           if-no-files-found: error
 
   release:
@@ -151,24 +160,30 @@ jobs:
           body: |
             Automatic build of `${{ github.sha }}`.
 
-            **`chip8bit.exe` is the app.** Double-click it: a window opens in your
-            browser with drag-and-drop, chip toggles, a player for the result and a
-            download button. Drop a `.mid`, `.vgm`, `.vgz`, `.gym` or `.zip` onto it
-            and the file is already queued when the window opens.
+            **`chip8bit.exe` is the app.** Double-click it and its own window opens —
+            no browser, no server, no install. Drag music onto the window or press
+            *Add files…*, click the extension chips you want, press Convert, then
+            play the result and save it wherever you like. Files dropped onto the
+            exe open the window with them already queued.
 
-            `chip8bit-cli.exe` is the same tool for scripts:
+            `chip8bit-cli.exe` is the same engine for scripts:
 
             ```
-            chip8bit-cli.exe song.mid --extensions all --stats
-            chip8bit-cli.exe game.vgz --extensions vrc6,mmc5,fds
-            chip8bit-cli.exe --list-extensions
+            chip8bit-cli.exe --cli song.mid --extensions all --stats
+            chip8bit-cli.exe --cli game.vgz -o converted
             ```
 
-            The `demo-*.wav` files are the built-in test tune on the bare NES and on
-            the console with every extension chip enabled.
+            Sound: drums are real samples through the delta channel, every note has
+            an attack/release so nothing clicks, and a channel only gets a second
+            voice when that genuinely sounds like a chord.
+
+            `demo-*.wav` are the built-in test tune on the bare NES and on the console
+            with every extension chip enabled. `window.png` is a real screenshot of
+            the app.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe
             dist/*.wav
+            dist/window.png
           prerelease: true
           make_latest: false
