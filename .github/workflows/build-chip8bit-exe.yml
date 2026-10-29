@@ -218,8 +218,10 @@ jobs:
             `demo-*.wav` are the built-in test tune on the bare NES and on the console
             with every extension chip enabled. `window-tracker.png`,
             `window-win95.png` and `window-amiga.png` are real screenshots of the
-            three looks — the FastTracker II pattern grid is the default, and the
-            look button in the header cycles between them.
+            three looks. The default window is a FastTracker II desk: blue frame,
+            lavender buttons, waveform scopes for every voice, and the pattern page
+            with note / instrument / volume in hex and row numbers every four
+            channels. The look button cycles between the three.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe

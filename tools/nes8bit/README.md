@@ -3,10 +3,11 @@
 Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, or a `.zip` of them) and
 re-composes them for the NES sound chip, then renders 8-bit audio.
 
-* **its own window, in 1995** — the window is a tracker: a FastTracker II style
-  pattern grid with one column per NES voice, hex notes, striped rows and a play
-  position that scrolls the pattern. Windows 95 and Amiga Workbench looks are one
-  click away; no browser, no server, no install;
+* **its own window, in 1995** — the window is a FastTracker II desk: the blue
+  frame, lavender buttons, per-channel waveform scopes, the pattern page with
+  row numbers down the side of every four channels and hex note/instrument/volume
+  columns. Windows 95 and Amiga Workbench looks are one click away; no browser,
+  no server, no install;
 * **it reads the MIDI before it converts it** — tracks are split into monophonic
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
