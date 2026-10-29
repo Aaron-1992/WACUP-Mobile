@@ -371,6 +371,23 @@ def main_test() -> None:
               abs(measured - expected) / expected < tolerance,
               "%.1f Hz vs %.1f Hz" % (measured, expected))
 
+    print("vibrato (only where the file asks for it, and it holds a pitch)")
+    check("a long string note holds its pitch",
+          _pitch_swing(48, 0.0) < 3.0, "%.1f%% swing" % _pitch_swing(48, 0.0))
+    check("a long pad note holds its pitch",
+          _pitch_swing(89, 0.0) < 3.0, "%.1f%% swing" % _pitch_swing(89, 0.0))
+    check("no invented wobble on sustained instruments",
+          _pitch_swing(48, 0.0) < 3.0 and _pitch_swing(40, 0.0) < 3.0,
+          "strings %.1f%%, violin %.1f%%" % (_pitch_swing(48, 0.0),
+                                             _pitch_swing(40, 0.0)))
+    file_vibrato = _pitch_swing(48, 0.3)
+    check("vibrato from the file still moves the pitch", file_vibrato > 1.5,
+          "%.1f%% swing" % file_vibrato)
+    check("and it stays a vibrato, not a siren", file_vibrato < 8.0,
+          "%.1f%% swing" % file_vibrato)
+    check("the widest CC1 vibrato is still musical", _pitch_swing(48, 0.5) < 10.0,
+          "%.1f%% swing" % _pitch_swing(48, 0.5))
+
     print("VGM export")
     vgm_path = os.path.join(work, "out.vgm")
     messages = write_vgm(vgm_path, base_notes, base_channels, duration, [])
@@ -464,6 +481,30 @@ def _measure(channel_id: str, pitch: int, channels) -> float:
                     if (buf[index - 1] <= 0 < buf[index])
                     or (buf[index - 1] >= 0 > buf[index]))
     return (crossings / 2.0) / (len(buf) / 44100.0)
+
+
+def _pitch_swing(program: int, vibrato: float, seconds: float = 2.5,
+                 channels=None) -> float:
+    """How much a sustained note's pitch moves, as a percentage of its own pitch."""
+    every = channels or chips.build_channel_set([])
+    spec = chips.channel_by_id(every, "pulse1")
+    note = Note(start=0.0, dur=seconds, pitch=72, velocity=110, volume=15, duty=0.5,
+                role="harmony", program=program, vibrato=vibrato)
+    buf = render_channel([note], spec, RenderOptions(rate=44100),
+                         int(44100 * seconds))
+    window = int(0.1 * 44100)
+    rows = []
+    for start in range(0, len(buf) - window, window):
+        chunk = buf[start:start + window]
+        energy = (sum(v * v for v in chunk) / len(chunk)) ** 0.5
+        crossings = sum(1 for a, b in zip(chunk, chunk[1:]) if (a < 0) != (b < 0))
+        rows.append((crossings / 2.0 / (window / 44100.0), energy))
+    top = max(energy for _f, energy in rows) or 1.0
+    freqs = [f for f, energy in rows if energy > 0.4 * top]
+    if len(freqs) < 4:
+        return 999.0
+    mean = sum(freqs) / len(freqs)
+    return 100.0 * (max(freqs) - min(freqs)) / mean
 
 
 def _write_fake_genesis_vgm(path: str) -> str:

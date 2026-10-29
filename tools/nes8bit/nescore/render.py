@@ -85,28 +85,31 @@ def note_frequency(pitch: float) -> float:
 # How each instrument family behaves over the life of a note. This is the single
 # biggest difference between "a square wave playing the right note" and "a clarinet":
 # a piano dies away, an organ holds flat, strings swell in, brass blats and settles.
-# (attack s, decay time constant s — 0 means hold, sustain floor, release scale,
-#  automatic vibrato in semitones)
+# (attack s, decay time constant s — 0 means hold, sustain floor, release scale)
+#
+# There is deliberately no invented vibrato here. Putting a wobble on every note
+# that happened to last longer than a third of a second turned sustained lines
+# seasick; vibrato is now only ever what the file itself asks for (MIDI CC1).
 FAMILY_ENVELOPE = {
-    "piano": (0.002, 0.34, 0.0, 1.0, 0.0),
-    "chromatic": (0.002, 0.26, 0.0, 1.0, 0.0),
-    "organ": (0.012, 0.0, 0.92, 1.0, 0.0),
-    "guitar": (0.003, 0.40, 0.0, 1.0, 0.0),
-    "bass": (0.006, 0.0, 0.90, 1.0, 0.0),
-    "strings": (0.075, 0.0, 0.82, 1.7, 0.16),
-    "ensemble": (0.065, 0.0, 0.84, 1.6, 0.13),
-    "brass": (0.034, 0.0, 0.86, 1.3, 0.05),
-    "reed": (0.028, 0.0, 0.88, 1.3, 0.10),
-    "pipe": (0.024, 0.0, 0.90, 1.3, 0.12),
-    "lead": (0.006, 0.0, 0.92, 1.1, 0.10),
-    "pad": (0.120, 0.0, 0.86, 1.9, 0.11),
-    "fx": (0.050, 0.0, 0.75, 1.5, 0.10),
-    "ethnic": (0.004, 0.32, 0.0, 1.0, 0.0),
-    "percussive": (0.001, 0.20, 0.0, 1.0, 0.0),
-    "sfx": (0.010, 0.22, 0.55, 1.0, 0.0),
+    "piano": (0.002, 0.34, 0.0, 1.0),
+    "chromatic": (0.002, 0.26, 0.0, 1.0),
+    "organ": (0.012, 0.0, 0.92, 1.0),
+    "guitar": (0.003, 0.40, 0.0, 1.0),
+    "bass": (0.006, 0.0, 0.90, 1.0),
+    "strings": (0.075, 0.0, 0.82, 1.7),
+    "ensemble": (0.065, 0.0, 0.84, 1.6),
+    "brass": (0.034, 0.0, 0.86, 1.3),
+    "reed": (0.028, 0.0, 0.88, 1.3),
+    "pipe": (0.024, 0.0, 0.90, 1.3),
+    "lead": (0.006, 0.0, 0.92, 1.1),
+    "pad": (0.120, 0.0, 0.86, 1.9),
+    "fx": (0.050, 0.0, 0.75, 1.5),
+    "ethnic": (0.004, 0.32, 0.0, 1.0),
+    "percussive": (0.001, 0.20, 0.0, 1.0),
+    "sfx": (0.010, 0.22, 0.55, 1.0),
 }
-DRUM_ENVELOPE = (0.001, 0.16, 0.0, 0.8, 0.0)
-DEFAULT_ENVELOPE = (0.006, 0.0, 0.9, 1.2, 0.0)
+DRUM_ENVELOPE = (0.001, 0.16, 0.0, 0.8)
+DEFAULT_ENVELOPE = (0.006, 0.0, 0.9, 1.2)
 _SHAPES: Dict[int, tuple] = {}
 
 
@@ -134,7 +137,7 @@ def _envelope(note: Note, elapsed: float) -> float:
     duration = max(note.dur, 1e-4)
     if elapsed < 0 or elapsed >= duration:
         return 0.0
-    attack_time, decay_tau, sustain, release_scale, _vib = envelope_shape(note)
+    attack_time, decay_tau, sustain, release_scale = envelope_shape(note)
 
     # what the volume register holds at this moment: a decay to the sustain floor
     # for struck instruments, flat for held ones
@@ -159,47 +162,52 @@ def _slice(buf: List[float], start: int, end: int, level: float) -> None:
         buf[start:end] = [level] * (end - start)
 
 
-def _vibrato(note: Note, seconds: float, enabled: bool, ramp_time: float = 0.15) -> float:
-    """Pitch multiplier for the note's vibrato depth, as a slow LFO."""
+def _vibrato(note: Note, seconds: float, enabled: bool,
+             ramp_time: float = 0.22) -> float:
+    """Pitch multiplier for the vibrato the *file* asks for, as a slow LFO.
+
+    The LFO runs on the note's position in the song, not on how far into the note
+    we are, so a run of repeated notes keeps one smooth wobble instead of restarting
+    at a random phase on every note — which is exactly what made it sound drunk.
+    """
     if not enabled or note.vibrato <= 0:
         return 1.0
     depth = note.vibrato / 12.0
-    # fade the wobble in, the way a singer or a synth LFO does
     ramp = min(1.0, seconds / max(1e-4, ramp_time))
-    return 1.0 + depth * ramp * math.sin(2.0 * math.pi * VIBRATO_HZ * seconds)
-
-
-def with_instrument_vibrato(note: Note, options: "RenderOptions") -> Note:
-    """Sustained instruments wobble slightly, the way a player's do."""
-    if not options.vibrato or note.vibrato > 0 or note.role == "drum":
-        return note
-    depth = envelope_shape(note)[4]
-    if depth <= 0 or note.dur < 0.32:
-        return note
-    copy = note.copy()
-    copy.vibrato = depth
-    return copy
+    position = note.start + seconds
+    return 1.0 + depth * ramp * math.sin(2.0 * math.pi * VIBRATO_HZ * position)
 
 
 # ----------------------------------------------------------------- oscillators
 
 def _emit_pulse(buf, a: int, b: int, note: Note, rate: int, gain: float,
                 vibrato: bool) -> None:
+    """Square wave with an accumulating phase.
+
+    The phase has to be carried from run to run: recomputing it from the sample
+    position against a period that is *changing* (vibrato, bend) makes the wave
+    jump mid-cycle, which is heard as a crackle — the "random wobble" that made
+    long notes sound broken.
+    """
     base = note_frequency(note.pitch + note.bend)
     duty = min(0.875, max(0.125, note.duty))
     pos = float(a)
+    phase = 0.0
     while pos < b:
         elapsed = (pos - a) / rate
         frequency = base * _vibrato(note, elapsed, vibrato)
         period = rate / max(1e-6, frequency)
         high = max(1.0, period * duty)
-        phase = (pos - a) % period
+        while phase >= period:
+            phase -= period
         level = 1.0 if phase < high else -1.0
-        nxt = pos + (high - phase) if phase < high else pos + (period - phase)
-        if nxt <= pos + 0.5:
-            nxt = pos + 1.0
+        step = (high - phase) if phase < high else (period - phase)
+        if step <= 0.5:
+            step = 1.0
+        nxt = pos + step
         run_end = min(float(b), nxt, pos + MAX_RUN)
         _slice(buf, int(pos), int(run_end), level * _envelope(note, elapsed) * gain)
+        phase += run_end - pos
         pos = run_end
 
 
@@ -304,7 +312,6 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
     vibrato = options.vibrato
 
     for note in notes:
-        note = with_instrument_vibrato(note, options)
         note_gain = gain * ROLE_GAIN.get(note.role, 0.7)
         a = int(round(note.start * rate))
         b = int(round(note.end() * rate))

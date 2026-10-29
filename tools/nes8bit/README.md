@@ -209,8 +209,11 @@ design, not by accident.
 **Every instrument gets its own envelope.** A square wave with one generic fade does
 not sound like a clarinet, a piano or a pad. The MIDI program decides the shape:
 a piano or a plucked string starts instantly and dies away (23 dB across a one-second
-note), an organ holds flat, strings and pads swell in over 60–120 ms, brass blats and
-settles, and anything sustained gets a little delayed vibrato the way a player's does.
+note), an organ holds flat, strings and pads swell in over 60–120 ms, and brass blats
+and settles. No vibrato is invented: a sustained note holds its pitch dead straight
+(measured: under 1 % drift over 2.5 s), and vibrato only ever comes from the file's
+own CC1 — at a fraction of a semitone, on a phase that runs with the song instead of
+restarting on every note.
 
 | piece | what it does |
 | --- | --- |
