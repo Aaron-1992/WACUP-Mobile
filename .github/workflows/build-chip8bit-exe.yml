@@ -32,6 +32,7 @@ jobs:
         working-directory: tools/nes8bit
         run: |
           mkdir -p demo
+          python tests/make_test_midi.py tests/genesis-style.mid
           python chip8bit.py tests/genesis-style.mid --extensions all --stats
           python chip8bit.py tests/genesis-style.mid
           # asset names on a release must stay boring: no spaces or brackets
