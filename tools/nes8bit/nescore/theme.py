@@ -44,7 +44,7 @@ class Theme:
     stripe: Color = (0, 0, 96)
     playing: Color = (0, 0, 60)
     playing_text: Color = (232, 232, 96)
-    empty_text: Color = (0, 0, 144)
+    empty_text: Color = (30, 30, 176)
     pattern_header_text: Color = (96, 168, 216)   # channel labels
     pattern_value: Color = (232, 232, 96)         # the volume column
 

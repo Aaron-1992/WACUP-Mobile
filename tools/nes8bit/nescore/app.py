@@ -27,6 +27,11 @@ from . import chips, convert, dialogs, demo, gm, theme
 
 WIDTH, HEIGHT = 1080, 760
 PATTERN_SPEED = 6          # ticks per pattern row, so an 8 s song is ~64 rows
+GROUP_SIZE = 4             # columns per row-number group, as in FastTracker II
+
+
+def _groups(columns: int) -> int:
+    return max(1, (columns + GROUP_SIZE - 1) // GROUP_SIZE)
 MIN_WIDTH, MIN_HEIGHT = 940, 660
 FPS = 60
 
@@ -85,6 +90,24 @@ _CHANNEL_NAMES = {
     "vrc6_pulse1": "V6-1", "vrc6_pulse2": "V6-2",
     "mmc5_pulse1": "M5-1", "mmc5_pulse2": "M5-2",
 }
+
+
+_CHIP_COLOURS = {
+    "nes": "text", "vrc6": "accent", "mmc5": "ok", "fds": "warn",
+    "n163": "light", "psg": "pattern_value", "dmc": "dim",
+}
+
+
+def _chip_colour(t: theme.Theme, channel: str):
+    """Header text colour, so you can see at a glance which chip a voice is on."""
+    chip = channel.split("_")[0]
+    if channel.startswith("psg"):
+        chip = "psg"
+    elif channel.startswith("n163"):
+        chip = "n163"
+    elif channel in ("pulse1", "pulse2", "triangle", "noise"):
+        chip = "nes"
+    return getattr(t, _CHIP_COLOURS.get(chip, "text"))
 
 
 def _channel_short(channel: str) -> str:
@@ -610,7 +633,6 @@ class App:
         result, channels, row_seconds, rows, grid = data
         header_h = 20
         row_h = self.fonts["pattern"].get_height() + 2
-        gutter = 28                      # the row-number column
         visible = max(1, (rect.height - header_h - 6) // row_h)
         max_rows = max(visible, rows)
         self.pattern_row = max(0, min(self.pattern_row, max_rows - visible))
@@ -627,10 +649,16 @@ class App:
 
         pattern_font = self.fonts["pattern"]
         readout_w = self.fonts["tiny"].size("ROW FF  00.0s  BPM 000")[0] + 10
-        usable = rect.width - gutter - 12 - readout_w
-        cell_w = pattern_font.size("C-4 50 33")[0] + 14
+        group_gap = 26                   # row numbers repeat every GROUP columns
+        usable = rect.width - 30 - readout_w
+        cell_w = pattern_font.size("C-4 50 33")[0] + 18
         columns = max(1, min(len(channels), usable // cell_w))
-        cell_w = min(120, max(cell_w, usable // max(1, columns)))
+        while columns > 1 and (columns * cell_w +
+                               _groups(columns) * group_gap) > usable:
+            columns -= 1
+        spare = usable - columns * cell_w - _groups(columns) * group_gap
+        if columns:
+            cell_w += max(0, min(28, spare // columns))
         self.pattern_columns = columns
         self.pattern_column = max(0, min(self.pattern_column,
                                          max(0, len(channels) - columns)))
@@ -643,23 +671,37 @@ class App:
             if offset >= 0:
                 hover = self.pattern_row + offset // row_h
 
-        # channel headers, like the numbered columns at the top of a pattern
         head = pygame.Rect(rect.x + 2, rect.y + 2, rect.width - 4, header_h)
         pygame.draw.rect(self.screen, t.face_alt, head)
         pygame.draw.line(self.screen, t.light, (head.x, head.bottom - 1),
                          (head.right, head.bottom - 1))
+
+        # column x positions, with a row-number gutter at the start of each group
+        positions = []
+        x = rect.x + 4
         for slot in range(columns):
+            if slot % GROUP_SIZE == 0:
+                x += group_gap
+            positions.append(x)
+            x += cell_w
+
+        # channel headers: a numbered box per voice, like a tracker's column strip
+        for slot, x in enumerate(positions):
             index = first + slot
             if index >= len(channels):
                 break
-            x = rect.x + 4 + gutter + slot * cell_w
-            name = channels[index]
-            label = "%02d %s" % (index + 1, _channel_short(name))
-            self._text(x + 2, head.y + 3, label, "small",
-                       t.accent if index == 0 else t.pattern_header_text)
-            if slot:
-                pygame.draw.line(self.screen, t.shadow, (x - 1, head.y),
-                                 (x - 1, head.bottom - 1))
+            box = pygame.Rect(x, head.y + 1, cell_w - 2, header_h - 2)
+            theme.field(self.screen, box, t, t.face_alt)
+            number = "%02d" % (index + 1)
+            number_w = self.fonts["tiny"].size(number)[0]
+            self._text(box.x + (box.width - number_w) // 2, box.y,
+                       number, "tiny",
+                       t.accent if index == first else t.dim)
+            name = _channel_short(channels[index])
+            name_w = self.fonts["tiny"].size(name)[0]
+            self._text(box.x + (box.width - name_w) // 2, box.y + 9, name,
+                       "tiny", _chip_colour(t, channels[index]))
+
         readout = "ROW %02X  %0.1fs  BPM %d" % (
             (hover if hover is not None else self.pattern_row) % 256,
             (hover if hover is not None else self.pattern_row) * row_seconds,
@@ -672,11 +714,9 @@ class App:
             hint = "\u2039 %d-%d of %d \u203a" % (first + 1, first + columns,
                                                   len(channels))
             hint_w = self.fonts["tiny"].size(hint)[0]
-            last_x = rect.x + 4 + gutter + columns * cell_w
-            if last_x + 8 + hint_w < readout_x - 8:
+            if positions[-1] + cell_w + 6 + hint_w < readout_x - 8:
                 self._text(readout_x - hint_w - 8, head.y + 4, hint, "tiny",
                            t.warn)
-
 
         for slot in range(visible):
             row_index = self.pattern_row + slot
@@ -688,18 +728,27 @@ class App:
             elif row_index % 4 == 0:
                 pygame.draw.rect(self.screen, t.stripe, row_rect)
 
+            # the row number repeats at the head of every group, like FT2
+            for slot_index in range(0, columns, GROUP_SIZE):
+                number_x = positions[slot_index] - group_gap + 4
+                number_color = t.accent if row_index % 16 == 0 else t.text
+                self._text(number_x, y, "%02X" % (row_index % 256), "tiny",
+                           number_color)
+            # a faint divider between each group of four voices, like the grid
+            for slot_index in range(GROUP_SIZE, columns, GROUP_SIZE):
+                line_x = positions[slot_index] - 7
+                pygame.draw.line(self.screen, t.shadow, (line_x, row_rect.y),
+                                 (line_x, row_rect.bottom - 1))
             if row_index == hover:
                 pygame.draw.rect(self.screen, t.light, row_rect, 1)
             elif row_index == self.pattern_row and not highlight:
                 pygame.draw.rect(self.screen, t.accent, row_rect, 1)
-            number_color = t.accent if row_index % 16 == 0 else t.text
-            self._text(rect.x + 6, y, "%02X" % (row_index % 256), "small",
-                       number_color)
+
             for column in range(columns):
                 index = first + column
                 if index >= len(channels):
                     break
-                x = rect.x + 4 + gutter + column * cell_w
+                x = positions[column]
                 note = grid.get((row_index, index))
                 if note is None:
                     self.screen.blit(pattern_font.render("--- .. ..", t.smooth,
@@ -734,8 +783,8 @@ class App:
                             self.pattern_row / max(1, rows - visible),
                             visible / max(1, rows))
         if len(channels) > columns:
-            bar = pygame.Rect(rect.x + 4 + gutter, rect.bottom - 12,
-                              rect.width - gutter - 20, 10)
+            bar = pygame.Rect(rect.x + 4, rect.bottom - 12,
+                              rect.width - 24, 10)
             theme.scrollbar(self.screen, bar, t,
                             first / max(1, len(channels) - columns),
                             columns / max(1, len(channels)))
