@@ -125,10 +125,11 @@ def _list_songs(inputs) -> int:
     return 0
 
 
-def _convert(source: str, args, extensions, channels, multiple: bool = False) -> int:
+def _convert(source: str, args, extensions, channels, multiple: bool = False,
+             sequence: str = "", bank: str = "") -> int:
     started = time.time()
-    choice = _SourceChoice(getattr(args, "sequence", ""),
-                          getattr(args, "bank", ""))
+    choice = _SourceChoice(sequence or getattr(args, "sequence", ""),
+                           bank or getattr(args, "bank", ""))
     song = importers.read_source(source, choice)
 
     for warning in song.warnings:
@@ -276,6 +277,9 @@ def main(argv=None) -> int:
                              "the one the song asks for)")
     parser.add_argument("--list-songs", action="store_true",
                         help="list the songs inside a DS ROM and stop")
+    parser.add_argument("--all-songs", action="store_true",
+                        help="convert every song of a DS ROM, each into its own "
+                             "files")
     parser.add_argument("--version", action="version", version="chip8bit %s" % VERSION)
 
     args = parser.parse_args(argv)
@@ -314,11 +318,20 @@ def main(argv=None) -> int:
           % (VERSION, len(channels), "" if len(channels) == 1 else "s",
              "" if not extensions else " (%s + %s)" % ("nes", "+".join(extensions))))
 
+    if args.all_songs:
+        sources = _every_song(sources)
+
     failures = 0
-    for index, source in enumerate(sources, 1):
-        print("\n[%d/%d] %s" % (index, len(sources), os.path.basename(source)))
+    for index, (source, sequence, bank, song_name) in enumerate(
+            [(item, "", "", "") if isinstance(item, str) else item
+             for item in sources], 1):
+        title = os.path.basename(source)
+        if song_name:
+            title += " — " + song_name
+        print("\n[%d/%d] %s" % (index, len(sources), title))
         try:
-            failures += _convert(source, args, extensions, channels, len(sources) > 1)
+            failures += _convert(source, args, extensions, channels,
+                                 len(sources) > 1, sequence, bank)
         except SystemExit:
             raise
         except Exception as error:            # keep batch conversion going
@@ -328,6 +341,27 @@ def main(argv=None) -> int:
     print("\ndone: %d ok, %d failed" % (len(sources) - failures, failures))
     _pause()
     return 0 if failures == 0 else 1
+
+
+def _every_song(sources):
+    """--all-songs: one entry per song of every DS file, files as they came.
+
+    The song is asked for by its index, which the archive matches exactly, and
+    its name is only used for the line that says what is being converted.
+    """
+    expanded = []
+    for source in sources:
+        try:
+            songs = _song_list(importers.find_for(source), source)
+        except Exception:
+            expanded.append((source, "", "", ""))
+            continue
+        if len(songs) <= 1:
+            expanded.append((source, "", "", ""))
+            continue
+        for index, _bank, name in songs:
+            expanded.append((source, str(index), "", name))
+    return expanded
 
 
 def _pause() -> None:

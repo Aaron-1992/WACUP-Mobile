@@ -148,7 +148,8 @@ will convert out of how many (`1/24  BGM_MAIN`) and a **SONGS** button opens the
 browser: every sequence in the archive, numbered, with its bank, the current one
 marked, a scroll wheel for long archives and a bank box for the odd song that uses a
 different bank. Pick with the mouse (a double click takes it), `↑` `↓` `PageUp`
-`PageDown` `Home` `End` then `ENTER`, or `ESC` to leave it as it was. *ADD ALL SONGS*
+`PageDown` `Home` `End` then `ENTER`, or type the first letters of a song's name to
+jump to it, or `ESC` to leave it as it was. *ADD ALL SONGS*
 queues every song in the archive as its own row, so a whole soundtrack converts in
 one go — and since a multi-song archive names its files after the song
 (`rom BGM_BOSS [nes].wav`, `rom BGM_BOSS.mid`, `rom BGM_BOSS.sf2`), two songs of one
@@ -160,9 +161,12 @@ From the command line it is the same list:
 chip8bit-cli.exe --cli --list-songs rom.nds
 chip8bit-cli.exe --cli rom.nds --sequence "BGM_BOSS" --stats
 chip8bit-cli.exe --cli rom.nds --sequence 12 --bank 3 --stats
+chip8bit-cli.exe --cli rom.nds --all-songs --stats
 ```
 
-`--sequence` takes a name fragment or a number as `--list-songs` prints it (the
+`--all-songs` converts the whole soundtrack in one go, each song into its own
+`.wav`, `.mid` and `.sf2`. `--sequence` takes a name fragment or a number as
+`--list-songs` prints it (the
 archive's own index, counting from 0); `--bank` overrides the bank the song asks for.
 The window numbers the same songs from 1, the way a person counts them.
 

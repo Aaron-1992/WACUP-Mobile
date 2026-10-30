@@ -215,6 +215,8 @@ class App:
         self.song_rows: List[tuple] = []
         self.song_list_view = pygame.Rect(0, 0, 0, 0)
         self._song_click = (-1, 0.0)
+        self._song_typed = ""
+        self._song_typed_at = 0.0
         self._catalogues_reading: set = set()
         self.queue_view = pygame.Rect(0, 0, 0, 0)
         self.results_view = pygame.Rect(0, 0, 0, 0)
@@ -503,8 +505,11 @@ class App:
         self.add_path(path)
 
     def remove_item(self, index: int) -> None:
-        if 0 <= index < len(self.items):
-            self.items.pop(index)
+        if not (0 <= index < len(self.items)):
+            return
+        gone = self.items.pop(index)
+        if self.song_window and self.song_window["item"] is gone:
+            self.song_window = None        # its songs went with it
 
     def clear_queue(self) -> None:
         if self.busy:
@@ -513,6 +518,7 @@ class App:
             return
         self.items = []
         self.scroll_queue = 0
+        self.song_window = None
         self.status = "List cleared — results are still in CONVERTED"
         self.status_error = False
 
@@ -824,7 +830,37 @@ class App:
             self.change_bank(1)
         elif event.key in (pygame.K_MINUS, pygame.K_LEFT):
             self.change_bank(-1)
+        elif getattr(event, "unicode", "") and event.unicode.isprintable() \
+                and event.unicode.strip():
+            self.jump_to_song(event.unicode)
         self._scroll_song_into_view()
+
+    def jump_to_song(self, typed: str) -> None:
+        """Type a few letters to jump to the song that starts with them."""
+        window = self.song_window
+        songs = self._window_songs()
+        if not window or not songs:
+            return
+        now = time.time()
+        if now - self._song_typed_at > 1.2:
+            self._song_typed = ""
+        self._song_typed_at = now
+        self._song_typed += typed.lower()
+        # "bgm15", "bgm_15" and "BGM 15" are the same name to a person typing
+        wanted = "".join(ch for ch in self._song_typed if ch.isalnum())
+        names = ["".join(ch for ch in name.lower() if ch.isalnum())
+                 for _index, _bank, name in songs]
+        start = window["selected"]
+        for matcher in (str.startswith, None):
+            for offset in range(1, len(songs) + 1):
+                position = (start + offset) % len(songs)
+                hit = (names[position].startswith(wanted) if matcher
+                       else wanted in names[position])
+                if hit and wanted:
+                    window["selected"] = position
+                    self._scroll_song_into_view()
+                    self.status = "Jumped to %s" % songs[position][2]
+                    return
 
     # ----------------------------------------------------------------- switches
 

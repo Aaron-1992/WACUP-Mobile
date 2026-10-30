@@ -642,6 +642,23 @@ def main_test() -> None:
             check("a file that holds no songs is refused (%s)" % bad_name,
                   "song" in str(error) or "not a DS" in str(error), str(error))
 
+    print("DS every song at once (--all-songs)")
+    all_dir = os.path.join(work, "all-songs")
+    code = main([two_songs, "--all-songs", "-o", all_dir])
+    made = sorted(os.listdir(all_dir)) if os.path.isdir(all_dir) else []
+    check("--all-songs converts every song of the archive", code == 0, str(code))
+    check("and leaves one wav, mid and sf2 per song",
+          len([name for name in made if name.endswith(".wav")]) == 2 and
+          len([name for name in made if name.endswith(".mid")]) == 2 and
+          len([name for name in made if name.endswith(".sf2")]) == 2, str(made))
+    both = [name for name in made if name.endswith(".wav")]
+    check("both songs are named after themselves",
+          any("BGM_MAIN" in name for name in both) and
+          any("BGM_BOSS" in name for name in both), str(both))
+    check("--all-songs on a plain MIDI still converts it",
+          main([midi_path, "--all-songs", "-o",
+                os.path.join(work, "all-midi")]) == 0)
+
     print("DS songs keep their own file names")
     song_dir = os.path.join(work, "songs")
     os.makedirs(song_dir, exist_ok=True)
