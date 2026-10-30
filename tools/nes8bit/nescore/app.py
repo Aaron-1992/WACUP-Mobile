@@ -1478,6 +1478,56 @@ def _visible_columns(app) -> int:
     return getattr(app, "pattern_columns", 1)
 
 
+def _selftest_ds_rom(app, check) -> None:
+    """Queue and convert a DS ROM in the window.
+
+    The ROM is built by tests/make_test_rom.py, which a packaged build does not
+    carry; there the check says so instead of failing, because the pipeline test
+    job covers it with the real file.
+    """
+    try:
+        tests_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "tests")
+        if tests_dir not in sys.path:
+            sys.path.insert(0, tests_dir)
+        import make_test_rom
+    except Exception:
+        if sys.stdout is not None:
+            sys.stdout.write("  --   DS window check skipped: no test ROM builder "
+                             "in this build\n")
+        return
+
+    rom = None
+    try:
+        rom = make_test_rom.write(os.path.join(tempfile.mkdtemp(), "gui.nds"))
+        app.add_path(rom)
+        check("a DS ROM can be queued", any(item.path == rom for item in app.items),
+              str([item.name for item in app.items]))
+        app.settings.extensions = []
+        app.start_convert()
+        deadline = time.time() + 120
+        while app.busy and time.time() < deadline:
+            app._drain()
+            time.sleep(0.02)
+        app._drain()
+        check("a DS ROM converts in the window",
+              bool(app.results) and app.results[0].ok,
+              app.results[0].error if app.results else "no result")
+        check("the window says a MIDI and a SoundFont came out",
+              "MID" in app.status and "SF2" in app.status, app.status)
+        app.draw()
+        check("the window still draws after a DS conversion",
+              app.screen is not None)
+        if app.results and app.results[0].ok:
+            app.play(0)
+            check("the DS result plays like any other", app.playing is not None,
+                  str(app.playing))
+            app.stop()
+    except Exception as error:               # a broken window test must say why
+        check("a DS ROM converts in the window", False,
+              "%s: %s" % (type(error).__name__, error))
+
+
 def selftest(screenshot: Optional[str] = None) -> int:
     """Drive the window headlessly: click the chips, convert, play, switch look."""
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -1662,36 +1712,7 @@ def selftest(screenshot: Optional[str] = None) -> int:
               str(len(app.settings.extensions)))
 
         # --- a Nintendo DS ROM: queue it, convert it, and see the extras named
-        try:
-            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "tests"))
-            import make_test_rom
-            rom = make_test_rom.write(os.path.join(tempfile.mkdtemp(), "gui.nds"))
-            app.add_path(rom)
-            check("a DS ROM can be queued", any(item.path == rom for item in app.items),
-                  str([item.name for item in app.items]))
-            app.settings.extensions = []
-            app.start_convert()
-            deadline = time.time() + 120
-            while app.busy and time.time() < deadline:
-                app._drain()
-                time.sleep(0.02)
-            app._drain()
-            check("a DS ROM converts in the window",
-                  bool(app.results) and app.results[0].ok,
-                  app.results[0].error if app.results else "no result")
-            check("the window says a MIDI and a SoundFont came out",
-                  "MID" in app.status and "SF2" in app.status, app.status)
-            app.draw()
-            check("the window still draws after a DS conversion", app.screen is not None)
-            if app.results and app.results[0].ok:
-                app.play(0)
-                check("the DS result plays like any other", app.playing is not None,
-                      str(app.playing))
-                app.stop()
-        except Exception as error:           # a broken window test must say why
-            check("a DS ROM converts in the window", False,
-                  "%s: %s" % (type(error).__name__, error))
+        _selftest_ds_rom(app, check)
 
         if screenshot:
             base, extension = os.path.splitext(screenshot)
