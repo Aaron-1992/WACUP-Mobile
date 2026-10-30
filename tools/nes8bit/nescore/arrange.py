@@ -16,7 +16,7 @@ The rules are the ones an NES composer uses by hand:
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import analyze, gm
+from . import analyze, gm, waves
 from .chips import DRUM_MAP, MELODIC_KINDS, ChannelSpec
 from .model import Note, Song
 
@@ -31,13 +31,43 @@ def _priority(role: str) -> float:
 
 
 ROLE_PREFERENCE = {
-    "melody": ["pulse", "saw", "fds", "wavetable", "psg", "triangle"],
-    "counter": ["pulse", "saw", "wavetable", "fds", "psg", "triangle"],
-    "harmony": ["pulse", "saw", "wavetable", "psg", "fds", "triangle"],
-    "bass": ["triangle", "saw", "fds", "psg", "wavetable", "pulse"],
-    "rhythm": ["pulse", "psg", "wavetable", "saw", "triangle", "fds"],
-    "drum": ["dmc", "noise"],
+    "melody": ["pulse", "huc", "saw", "fds", "wavetable", "psg", "triangle"],
+    "counter": ["pulse", "huc", "saw", "wavetable", "fds", "psg", "triangle"],
+    "harmony": ["pulse", "huc", "saw", "wavetable", "psg", "fds", "triangle"],
+    "bass": ["triangle", "huc", "saw", "fds", "psg", "wavetable", "pulse"],
+    "rhythm": ["pulse", "huc", "psg", "wavetable", "saw", "triangle", "fds"],
+    # a drum needs a channel that can make noise: the delta channel, a noise
+    # channel, or the PC Engine's channel 2, which is its noise channel
+    "drum": ["dmc", "noise", "huc"],
 }
+
+# Instruments that are *timbre*, not just pitch: a flute, a string section, an
+# organ and a brass stab are different waveforms, and only the PC Engine holds a
+# waveform in RAM. When one of these lines plays and a PC Engine channel is free,
+# the line belongs there — that is the difference between "the right notes on a
+# square wave" and "a flute".
+RICH_FAMILIES = {"piano", "chromatic", "organ", "guitar", "strings", "ensemble",
+                 "brass", "reed", "pipe", "ethnic", "pad"}
+
+
+def _wanted_kinds(note: Note, role: str, has_huc: bool) -> List[str]:
+    """Which channel kinds suit this note, best first.
+
+    With no PC Engine in the console this is the fixed table it always was, so a
+    plain NES render is unchanged. With one, a line whose instrument has a real
+    timbre (flute, strings, organ, brass…) is offered the wave-RAM channels
+    first; a square-wave lead, a bass and the drums keep the order they had.
+    """
+    order = ROLE_PREFERENCE.get(role) or ROLE_PREFERENCE["harmony"]
+    if not has_huc or "huc" not in order:
+        return order
+    if role == "bass":
+        return order                       # the NES triangle is the better bass
+    family = gm.family(note.program)
+    if family in RICH_FAMILIES:
+        return ["huc"] + [kind for kind in order if kind != "huc"]
+    return order
+
 
 # How loud each kind sits in the mix, so parts balance the way a real track does.
 KIND_GAIN = {
@@ -49,6 +79,7 @@ KIND_GAIN = {
     "wavetable": 0.4,
     "psg": 0.45,
     "dmc": 0.4,
+    "huc": 0.5,
 }
 
 
@@ -89,6 +120,8 @@ class Stats:
     deduped: int = 0              # doubled another part note for note
     channels_used: Dict[str, int] = field(default_factory=dict)
     per_channel_notes: Dict[str, int] = field(default_factory=dict)
+    waves: Dict[str, int] = field(default_factory=dict)    # PC Engine wave RAM
+    folded: int = 0               # octave-folded to fit the channel's range
     clusters: int = 0
 
     def as_lines(self) -> List[str]:
@@ -110,6 +143,7 @@ class Stats:
                     lines.append("    dropped %-27s: %d notes"
                                  % (role, self.thinned[role]))
         lines += [
+            "  octave-folded into the chip's range        : %d" % self.folded,
             "  doubled notes folded into one              : %d" % self.deduped,
             "  notes dropped (too short/quiet)            : %d" % self.dropped,
             "  channel-sharing clusters                   : %d" % self.clusters,
@@ -117,6 +151,11 @@ class Stats:
         ]
         for channel in sorted(self.per_channel_notes):
             lines.append("    %-14s %5d notes" % (channel, self.per_channel_notes[channel]))
+        if self.waves:
+            shown = sorted(self.waves.items(), key=lambda item: -item[1])
+            lines.append("  PC Engine wave RAM                       : %s" % ", ".join(
+                "%s x%d" % (waves.describe(name), count)
+                for name, count in shown[:6]))
         return lines
 
 
@@ -185,6 +224,65 @@ def _duty_for(note: Note) -> float:
     if note.pitch <= 40 and duty < 0.5:
         duty = 0.5
     return duty
+
+
+# What each kind of voice can actually play, in MIDI note numbers. A chip has no
+# idea what "C1" means: it has a timer, and above the top of its range it either
+# aliases into a whistle or the renderer has to drop the note. Real chip composers
+# move a part an octave rather than lose it, so that is what happens here.
+_PLAYABLE = {
+    "pulse": (33, 96),        # A1 .. C7: above that a pulse is a dog whistle
+    "triangle": (24, 96),
+    "saw": (28, 100),
+    "fds": (24, 100),
+    "wavetable": (28, 96),
+    "psg": (28, 96),
+    "huc": (24, 100),         # the PC Engine goes an octave lower than the APU
+    "dmc": (24, 96),
+}
+_CENTRE = 60
+
+
+def _fit_pitch(pitch: int, kind: str) -> tuple:
+    """Move a pitch by whole octaves until the channel can play it.
+
+    Returns (pitch, moved). Whole octaves only: the tune keeps its intervals and
+    its key, it just sits where the hardware lives.
+    """
+    low, high = _PLAYABLE.get(kind, (24, 100))
+    if low <= pitch <= high:
+        return pitch, False
+    candidate = pitch
+    # climb or fall by octaves towards the middle of the range, then stop; a note
+    # that is still out of reach even at the edge is left where it is
+    while candidate > high and candidate - 12 >= low:
+        candidate -= 12
+    while candidate < low and candidate + 12 <= high:
+        candidate += 12
+    if candidate > high:
+        candidate = high
+    if candidate < low:
+        candidate = low
+    return candidate, candidate != pitch
+
+
+def _pan_for(note: Note, spec: ChannelSpec) -> float:
+    """Where a voice sits in the stereo field, on a chip that can pan.
+
+    A PC Engine composer spreads the inner parts either side of the lead and keeps
+    the tune and the bass down the middle, so that is what happens here: only the
+    harmony, counter and rhythm lines move, and only by a step or two of the
+    chip's 4-bit pan register. A mono render ignores it entirely.
+    """
+    if not spec.pannable or note.role in ("melody", "bass", "drum"):
+        return 0.0
+    reach = {"harmony": 0.42, "counter": 0.28, "rhythm": 0.22}.get(note.role, 0.0)
+    if not reach:
+        return 0.0
+    side = 1.0 if (sum(ord(character) for character in spec.id) & 1) else -1.0
+    # quantise to the hardware's 16 pan steps, so it is a register value and not
+    # a floating-point idea of one
+    return round(side * reach * 7.0) / 7.0
 
 
 def _voice_budget(channel_count: int) -> Optional[Dict[str, int]]:
@@ -285,6 +383,7 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     for kind in by_kind:
         by_kind[kind].sort(key=lambda s: s.spec.priority)
 
+    has_huc = any(spec.kind == "huc" for spec in channels)
     clusters: List[_Cluster] = []
     placed: List[Note] = []
     voice_channel: Dict[tuple, str] = {}     # (part, voice) -> channel it lives on
@@ -336,7 +435,7 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
             state.prune(note.start)
 
         role = note.role if note.role in ROLE_PREFERENCE else "harmony"
-        wanted_kinds = ROLE_PREFERENCE[role]
+        wanted_kinds = _wanted_kinds(note, role, has_huc)
 
         drum = note.role == "drum"
         if drum:
@@ -366,6 +465,8 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
             candidates = []
             for rank, kind in enumerate(wanted_kinds):
                 for state in by_kind.get(kind, []):
+                    if drum and kind == "huc" and not state.spec.noise_capable:
+                        continue        # five of the six are tone-only
                     if not state.free_at(note.start, note.end()):
                         continue
                     owner = claims.get(state.spec.id)
@@ -427,11 +528,19 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
                 voice_channel[key] = chosen.spec.id
 
         note.channel = chosen.spec.id
+        if not drum:
+            folded, moved = _fit_pitch(note.pitch, chosen.spec.kind)
+            if moved:
+                note.pitch = folded
+                stats.folded += 1
         note.volume = _velocity_to_level(note.velocity, note.role)
         if note.expression < 0.999:
             # CC7/CC11 in the file: quiet passages stay quiet
             note.volume = max(1, min(15, int(round(note.volume * (0.45 + 0.55 * note.expression)))))
         note.duty = _duty_for(note)
+        if chosen.spec.kind == "huc":
+            note.wave = waves.for_instrument(note.program, note.role, note.pitch)
+        note.pan = _pan_for(note, chosen.spec)
         if drum:
             note.volume = max(6, note.volume)
         _apply_envelope(note, chosen.spec)
@@ -450,9 +559,12 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     notes_out.sort(key=lambda n: (n.start, n.pitch))
     stats.clusters = len(clusters)
     stats.per_channel_notes = {}
+    stats.waves = {}
     for note in notes_out:
         stats.per_channel_notes[note.channel] = \
             stats.per_channel_notes.get(note.channel, 0) + 1
+        if note.channel.startswith("pce") and note.role != "drum":
+            stats.waves[note.wave] = stats.waves.get(note.wave, 0) + 1
     return notes_out, stats
 
 
@@ -571,6 +683,23 @@ def _steal_for_drum(note: Note, by_kind):
             score = (weakest_rank, len(active))
             if best is None or score < best[0]:
                 best = (score, state, active)
+    if best is None and rank >= 4:
+        # The PC Engine's channel 2 can be switched to noise. A kick or a snare
+        # may take it from a chord line — never from the tune or the bass — and
+        # only when no drum channel is free at all.
+        options = []
+        for state in by_kind.get("huc", []):
+            if not state.spec.noise_capable:
+                continue
+            active = [entry for entry in state.active
+                      if entry["cluster"] is None
+                      and entry["note"].end() > note.start
+                      and entry["note"].role in ("harmony", "counter", "rhythm")]
+            if active:
+                options.append((len(active), state, active))
+        if options:
+            options.sort(key=lambda item: item[0])
+            best = (options[0][0], options[0][1], options[0][2])
     if best is None:
         return None
     _, state, active = best

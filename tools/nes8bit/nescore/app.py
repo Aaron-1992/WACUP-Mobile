@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 
 import pygame
 
-from . import chips, convert, dialogs, demo, gm, importers, theme
+from . import chips, convert, dialogs, demo, gm, importers, theme, waves as waves_module
 
 WIDTH, HEIGHT = 1200, 830
 MIN_WIDTH, MIN_HEIGHT = 1000, 740
@@ -48,6 +48,11 @@ _CHANNEL_NAMES = {
     "dmc": "DMC", "fds": "FDS", "vrc6_saw": "V6S",
     "vrc6_pulse1": "V6-1", "vrc6_pulse2": "V6-2",
     "mmc5_pulse1": "M5-1", "mmc5_pulse2": "M5-2",
+    # the second NES APU, and the PC Engine's six
+    "nes2_pulse1": "2PU1", "nes2_pulse2": "2PU2", "nes2_triangle": "2TRI",
+    "nes2_noise": "2NOI",
+    "pce1": "PC1", "pce2": "PC2", "pce3": "PC3", "pce4": "PC4",
+    "pce5": "PC5", "pce6": "PC6",
 }
 
 
@@ -888,7 +893,7 @@ class App:
         if len(self.settings.extensions) == len(chips.EXTENSION_CHANNELS):
             self.settings.extensions = []
         else:
-            self.settings.extensions = list(chips.EXTENSION_CHANNELS)
+            self.settings.extensions = chips.ordered_extensions()
         self._save_settings()
 
     def no_chips(self) -> None:
@@ -920,7 +925,7 @@ class App:
 
     def step_chips(self, step: int) -> None:
         """One extension chip on or off, in the CHIPS panel's own order."""
-        names = list(chips.EXTENSION_CHANNELS)
+        names = chips.ordered_extensions()
         if not names:
             return
         if step > 0:
@@ -1089,17 +1094,25 @@ class App:
                            rect.height)
         inner = theme.panel(self.screen, info, t, "WHAT I FOUND", self.fonts["tiny"])
         theme.field(self.screen, inner, t, t.field)
-        lines = self._found_lines()
-        y = inner.y + 4
+        lines = [line for line in self._found_lines()[:4]]
         colours = (t.field_text, t.pattern_inst, t.pattern_vol, t.accent)
-        for index, line in enumerate(lines[:4]):
-            if not line:
-                continue
-            key = "body" if index == 0 else "small"
+        keys = ("body", "small", "small", "tiny")
+        shown = [index for index, line in enumerate(lines) if line]
+        if not shown:
+            return
+        # the four lines have to fit the panel they are drawn in: a line that
+        # runs under the frame is a line nobody can read
+        needed = sum(self.fonts[keys[index]].get_height() for index in shown)
+        step = 5
+        if needed + step * (len(shown) - 1) > inner.height - 6:
+            step = max(0, (inner.height - 6 - needed) // max(1, len(shown) - 1))
+        y = inner.y + 3
+        for index in shown:
+            key = keys[index]
             font = self.fonts[key]
-            self._text(inner.x + 8, y, _fit(font, line, inner.width - 16), key,
-                       colours[min(index, 3)])
-            y += font.get_height() + 5
+            self._text(inner.x + 8, y, _fit(font, lines[index], inner.width - 16),
+                       key, colours[min(index, 3)])
+            y += font.get_height() + step
 
     def _draw_logo(self, rect: pygame.Rect) -> None:
         t = self.theme
@@ -1150,6 +1163,13 @@ class App:
             if getattr(result, "thinned", 0):
                 kept += " · %d lines thinned" % result.thinned
             out.append(kept)
+            waves = getattr(result, "waves", None)
+            if waves:
+                # what the PC Engine was told to load into its wave RAM
+                shown = sorted(waves.items(), key=lambda item: -item[1])[:4]
+                out.append("PC Engine wave RAM: " + ", ".join(
+                    "%s x%d" % (waves_module.describe(name), count)
+                    for name, count in shown))
         while len(out) < 4:
             out.append("")
         return out[:4]
@@ -1172,7 +1192,10 @@ class App:
         every = [spec.id for spec in
                  chips.build_channel_set(list(chips.EXTENSION_CHANNELS))]
 
-        per_row = 11
+        # Two rows of sixteen holds every voice the console can have (4 APU +
+        # the cartridge chips + a second NES + a PC Engine = 32). It used to be
+        # two rows of eleven, which silently hid the last ten voices.
+        per_row = 16
         rows = 2
         box_w = (area.width - (per_row - 1) * 3) // per_row
         box_h = (area.height - (rows - 1) * 3 - 2) // rows
@@ -1199,15 +1222,18 @@ class App:
                                                t.pattern_head if live
                                                else t.pattern_empty)
             self.screen.blit(number, (box.x + 3, box.y + 1))
+            tag = ""
+            colour = t.pattern_inst
             if result is not None and live:
                 count = len([n for n in result.notes if n.channel == every[index]])
-                if count:
-                    tag = self.fonts["head"].render(str(count), t.smooth,
-                                                    t.pattern_inst)
-                    self.screen.blit(tag, (box.right - tag.get_width() - 3, box.y + 1))
+                tag = str(count) if count else ""
             elif not live:
-                tag = self.fonts["head"].render("OFF", t.smooth, t.pattern_empty)
-                self.screen.blit(tag, (box.right - tag.get_width() - 3, box.y + 1))
+                tag = "OFF"
+                colour = t.pattern_empty
+            if tag:
+                surface = self.fonts["head"].render(tag, t.smooth, colour)
+                self.screen.blit(surface, (box.right - surface.get_width() - 3,
+                                           box.y + 1))
 
     def _draw_scope_trace(self, box: pygame.Rect, channel: str, result,
                           duration: float) -> None:
@@ -1590,10 +1616,20 @@ class App:
             y += button_h + gap
 
         # --- chips: two columns, one row per chip, like FT2's button blocks
-        entries = [("", "NES", 4)] + [
-            (name, name.upper(), len(spec))
-            for name, spec in chips.EXTENSION_CHANNELS.items()]
-        rows_needed = (len(entries) + 1) // 2
+        # The whole consoles get a line of their own — they are not cartridge
+        # chips, they are a second NES and a PC Engine — and the cartridge
+        # add-ons share the two columns underneath. Full-width rows also give
+        # names like "PC ENGINE" room to be read instead of truncated.
+        entries = [("", "NES", 4, True),
+                   ("dual", chips.CHIP_LABELS["dual"],
+                    len(chips.EXTENSION_CHANNELS["dual"]), True),
+                   ("pce", chips.CHIP_LABELS["pce"],
+                    len(chips.EXTENSION_CHANNELS["pce"]), True)]
+        entries += [(name, chips.CHIP_LABELS.get(name, name.upper()),
+                     len(chips.EXTENSION_CHANNELS[name]), False)
+                    for name in chips.ordered_extensions()
+                    if name not in ("dual", "pce")]
+        rows_needed = 3 + (len(entries) - 3 + 1) // 2
         row_h = 24
         chips_h = rows_needed * row_h + 28
         chips_box = pygame.Rect(rect.x, y + 2, rect.width, chips_h)
@@ -1603,25 +1639,37 @@ class App:
         theme.field(self.screen, inner, t, t.field)
         self.chip_rects = []
         col_w = inner.width // 2
-        for index, (name, label, count) in enumerate(entries):
-            column = index % 2
-            line = index // 2
-            row = pygame.Rect(inner.x + column * col_w,
-                              inner.y + 1 + line * row_h,
-                              col_w - 2, row_h - 2)
+        column, line = 0, 0
+        for index, (name, label, count, wide) in enumerate(entries):
+            if wide:
+                if column:
+                    column, line = 0, line + 1
+                row = pygame.Rect(inner.x, inner.y + 1 + line * row_h,
+                                  inner.width - 2, row_h - 2)
+                column, line = 0, line + 1
+            else:
+                row = pygame.Rect(inner.x + column * col_w,
+                                  inner.y + 1 + line * row_h,
+                                  col_w - 2, row_h - 2)
+                column += 1
+                if column >= 2:
+                    column, line = 0, line + 1
             on = name == "" or name in self.settings.extensions
             if row.collidepoint(self.mouse) and name:
                 self.screen.fill(t.playing, row)
             self._text(row.x + 4, row.y + (row_h - 16) // 2, "%02d" % (index + 1),
                        "head", t.pattern_vol if on else t.pattern_empty)
-            self._text(row.x + 32, row.y + (row_h - self.fonts["small"].get_height()) // 2,
-                       label, "small", t.field_text if on else t.pattern_empty)
             tag = "+%d %s" % (count, "ON" if on else "OFF")
             tag_surface = self.fonts["tiny"].render(
                 tag, t.smooth, t.ok if on else t.pattern_empty)
             self.screen.blit(tag_surface,
                              (row.right - tag_surface.get_width() - 4,
                               row.y + (row_h - 16) // 2))
+            room = row.right - tag_surface.get_width() - 8 - (row.x + 32)
+            self._text(row.x + 32,
+                       row.y + (row_h - self.fonts["small"].get_height()) // 2,
+                       _fit(self.fonts["small"], label, room), "small",
+                       t.field_text if on else t.pattern_empty)
             self.chip_rects.append((name, row.copy()))
             if name:
                 self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
@@ -2180,7 +2228,9 @@ def selftest(screenshot: Optional[str] = None) -> int:
         check("window opens", app.screen.get_size() == (WIDTH, HEIGHT))
         check("starts in the tracker look", app.look == "tracker", app.look)
         check("starts with 4 voices", app.voice_count() == 4)
-        check("seven chip rows", len(app.chip_rects) == 7, str(len(app.chip_rects)))
+        check("one chip row per console and cartridge chip",
+              len(app.chip_rects) == 1 + len(chips.EXTENSION_CHANNELS),
+              str(len(app.chip_rects)))
         check("pattern text is big enough to read",
               app.fonts["pattern"].get_height() >= 20,
               str(app.fonts["pattern"].get_height()))
@@ -2188,8 +2238,11 @@ def selftest(screenshot: Optional[str] = None) -> int:
         for name, rect in app.chip_rects:
             if name:
                 click(rect)
-        check("all chips on => 22 voices", app.voice_count() == 22,
-              str(app.voice_count()))
+        all_voices = 4 + sum(len(spec) for spec in chips.EXTENSION_CHANNELS.values())
+        check("all chips on => every voice (4 APU + 2x NES + a PC Engine + "
+              "the cartridge chips)",
+              app.voice_count() == all_voices and all_voices == 32,
+              "%d, expected %d" % (app.voice_count(), all_voices))
 
         app.switch_look()
         check("switching the look works", app.look == "win95", app.look)
@@ -2319,8 +2372,29 @@ def selftest(screenshot: Optional[str] = None) -> int:
         check("no extensions left", app.settings.extensions == [],
               str(app.settings.extensions))
         app.all_chips()
-        check("ALL turns them back on", len(app.settings.extensions) == 6,
+        check("ALL turns them back on",
+              len(app.settings.extensions) == len(chips.EXTENSION_CHANNELS),
               str(len(app.settings.extensions)))
+
+        # --- the two whole consoles are one click each, and the count follows
+        app.no_chips()
+        app.draw()
+        rows = dict(app.chip_rects)
+        if "dual" in rows:
+            click(rows["dual"])
+            check("2x NES is one click and doubles the console",
+                  app.voice_count() == 8, str(app.voice_count()))
+        if "pce" in rows:
+            click(rows["pce"])
+            check("PC Engine adds its six wave channels",
+                  app.voice_count() == 14, str(app.voice_count()))
+            check("both consoles are on at once",
+                  set(["dual", "pce"]) <= set(app.settings.extensions),
+                  str(app.settings.extensions))
+        for name in ("dual", "pce"):
+            if name in rows:
+                click(rows[name])          # leave them off for the next checks
+        app.no_chips()
 
         # --- the header spinners must do what their numbers say
         app.draw()

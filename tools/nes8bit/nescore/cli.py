@@ -27,10 +27,17 @@ def _extension_help() -> str:
     formats = ["  %s : %s" % (name, label) for name, label in importers.available()]
     lines = ["Input formats:", *formats, "  zip : first MIDI/VGM/GYM inside", "",
              "NES base console: pulse1, pulse2, triangle, noise", "", "Extension chips:"]
-    for name, specs in chips.EXTENSION_CHANNELS.items():
+    for name in chips.ordered_extensions():
+        specs = chips.EXTENSION_CHANNELS[name]
         kinds = ", ".join("%s (%s)" % (s.id, s.kind) for s in specs)
         lines.append("  %-6s +%d channel%s : %s" %
                      (name, len(specs), "" if len(specs) == 1 else "s", kinds))
+    lines += [
+        "",
+        "  dual = a second NES APU (8 voices of the hardware you know)",
+        "  pce  = PC Engine / HuC6280: six channels, each with its own 32-step",
+        "         waveform, 5-bit volume and stereo pan",
+    ]
     return "\n".join(lines)
 
 
@@ -39,7 +46,7 @@ def _parse_extensions(value):
         return []
     names = [part.strip().lower() for part in value.replace("+", ",").split(",") if part.strip()]
     if "all" in names or "every" in names:
-        return list(chips.EXTENSION_CHANNELS.keys())
+        return chips.ordered_extensions()
     chosen = []
     for name in names:
         if name in ("nes", "none", "base"):
@@ -226,8 +233,9 @@ def main(argv=None) -> int:
                         help="MIDI / VGM / VGZ / GYM / NDS files or folders")
     parser.add_argument("-o", "--output", help="output file or folder")
     parser.add_argument("-e", "--extensions", default="",
-                        help="extension chips to enable, comma separated: "
-                             "vrc6, mmc5, fds, n163, dmc, psg, or 'all'")
+                        help="chips to enable, comma separated: dual (a second "
+                             "NES APU), pce (PC Engine), vrc6, mmc5, fds, n163, "
+                             "dmc, psg, or 'all'")
     parser.add_argument("--list-extensions", action="store_true",
                         help="show the chips and the channels they add, then exit")
     parser.add_argument("--stats", action="store_true", help="report what went where")

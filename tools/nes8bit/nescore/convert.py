@@ -93,6 +93,7 @@ class Result:
     song: str = ""                                         # the song taken from an archive
     song_index: int = 0                                    # 1-based, for "12 of 37"
     song_count: int = 0
+    waves: Dict[str, int] = field(default_factory=dict)    # PC Engine wave RAM
 
 
 def output_name(source: str, settings: Settings, label: str = "") -> str:
@@ -239,6 +240,7 @@ def convert_file(source: str, settings: Settings,
     result.voices = len(stats.per_channel_notes)
     result.channels = dict(sorted(stats.per_channel_notes.items()))
     result.stats = stats
+    result.waves = dict(stats.waves)
     result.render_seconds = time.time() - started
     report("Done", 1.0)
     return result

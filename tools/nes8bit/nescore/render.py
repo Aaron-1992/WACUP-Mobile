@@ -21,6 +21,10 @@ renders in seconds.
 * fds       - single-cycle wavetable, like the FDS's 64-step wave
 * wavetable - Namco 163 style 4-bit wavetable
 * psg       - SN76489 square with 4 attenuation steps
+* huc       - HuC6280 (PC Engine): a 32-step wave from its RAM, 5-bit volume,
+              and its own stereo pan — the wave is chosen per note from the
+              instrument, so a flute, a sawtooth string and a square lead are
+              three different waveforms rather than three squares
 * dmc/noise - sampled percussion (kick, snare, hats, toms, crash)
 """
 
@@ -31,7 +35,7 @@ import wave
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from . import gm, mix, samples
+from . import gm, mix, samples, waves
 from .arrange import KIND_GAIN
 from .chips import NOISE_PERIODS, channel_by_id
 from .model import Note
@@ -125,7 +129,7 @@ def envelope_shape(note: Note) -> tuple:
     return shape
 
 
-def _envelope(note: Note, elapsed: float) -> float:
+def _envelope(note: Note, elapsed: float, levels: int = 15) -> float:
     """Level at a moment in time: the instrument's own shape, with soft ramps.
 
     The volume register is 4-bit, so the level is quantised the way the hardware
@@ -145,7 +149,9 @@ def _envelope(note: Note, elapsed: float) -> float:
     if decay_tau > 0.0 and elapsed > attack_time:
         held = sustain + (1.0 - sustain) * \
             math.exp(-(elapsed - attack_time) / decay_tau)
-    held = int(round(note.volume * held)) / 15.0        # 4-bit steps, like the APU
+    # the register granularity of the chip the note landed on: 4-bit on the NES,
+    # 5-bit on the PC Engine, so the same velocity steps differently there
+    held = int(round(note.volume / 15.0 * levels * held)) / float(levels)
 
     # a 33 ms sixteenth cannot afford a 75 ms swell
     attack_time = min(attack_time, duration * 0.35)
@@ -181,7 +187,7 @@ def _vibrato(note: Note, seconds: float, enabled: bool,
 # ----------------------------------------------------------------- oscillators
 
 def _emit_pulse(buf, a: int, b: int, note: Note, rate: int, gain: float,
-                vibrato: bool) -> None:
+                vibrato: bool, levels: int = 15) -> None:
     """Square wave with an accumulating phase.
 
     The phase has to be carried from run to run: recomputing it from the sample
@@ -206,13 +212,14 @@ def _emit_pulse(buf, a: int, b: int, note: Note, rate: int, gain: float,
             step = 1.0
         nxt = pos + step
         run_end = min(float(b), nxt, pos + MAX_RUN)
-        _slice(buf, int(pos), int(run_end), level * _envelope(note, elapsed) * gain)
+        _slice(buf, int(pos), int(run_end),
+               level * _envelope(note, elapsed, levels) * gain)
         phase += run_end - pos
         pos = run_end
 
 
 def _emit_steps(buf, a: int, b: int, note: Note, steps: List[float], rate: int,
-                gain: float, vibrato: bool) -> None:
+                gain: float, vibrato: bool, levels: int = 15) -> None:
     """Stepped (wavetable / triangle / saw) oscillator, one step per hardware tick."""
     base = note_frequency(note.pitch + note.bend)
     count = len(steps)
@@ -224,9 +231,21 @@ def _emit_steps(buf, a: int, b: int, note: Note, steps: List[float], rate: int,
         clock = rate / max(1e-6, frequency * count)
         run_end = min(float(b), pos + max(1.0, clock), pos + MAX_RUN)
         _slice(buf, int(pos), int(run_end),
-               steps[index % count] * _envelope(note, elapsed) * gain)
+               steps[index % count] * _envelope(note, elapsed, levels) * gain)
         index += 1
         pos = run_end
+
+
+def _emit_huc(buf, a: int, b: int, note: Note, rate: int, gain: float,
+              vibrato: bool) -> None:
+    """A HuC6280 channel: 32-step wave RAM, 5-bit volume, software sweep.
+
+    The wave comes from the note, not from the chip: a converter that loaded the
+    same square into all six channels would be wasting the one thing this console
+    has that the NES does not.
+    """
+    _emit_steps(buf, a, b, note, waves.level(note.wave), rate, gain, vibrato,
+                levels=HUC_LEVELS)
 
 
 def _triangle() -> List[float]:
@@ -243,6 +262,7 @@ SAW_STEPS = [(step / 15.0) * 2.0 - 1.0 for step in range(16)]
 WAVETABLE_STEPS = [math.sin(2 * math.pi * step / 32.0) for step in range(32)]
 FDS_STEPS = [math.sin(2 * math.pi * step / 64.0) for step in range(64)]
 PSG_STEPS = [1.0] * 4 + [-1.0] * 4
+HUC_LEVELS = 31           # the PC Engine's volume register is 5-bit
 
 
 def _emit_noise(buf, a: int, b: int, note: Note, rate: int, gain: float) -> None:
@@ -319,7 +339,8 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
             continue
         b = min(b, total_samples)
 
-        percussion = note.role == "drum" and spec.kind in ("noise", "dmc")
+        percussion = note.role == "drum" and (
+            spec.kind in ("noise", "dmc") or spec.noise_capable)
 
         if percussion and options.sampled_drums:
             _emit_sample(buf, a, b, note, rate, note_gain * 1.55)
@@ -341,12 +362,32 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
             _emit_steps(buf, a, b, note, WAVETABLE_STEPS, rate, note_gain, vibrato)
         elif spec.kind == "psg":
             _emit_steps(buf, a, b, note, PSG_STEPS, rate, note_gain, vibrato)
-        elif spec.kind == "noise":
+        elif spec.kind == "noise" or (percussion and spec.noise_capable):
+            # a drum on a PC Engine channel: channel 2 is the noise channel on
+            # that console, and with sampled drums off it falls back to the LFSR
             _emit_noise(buf, a, b, note, rate, note_gain)
+        elif spec.kind == "huc":
+            _emit_huc(buf, a, b, note, rate, note_gain, vibrato)
         elif spec.kind == "dmc":
             # a melodic note on the delta channel: play the hit's own pitch
             _emit_sample(buf, a, b, note, rate, note_gain)
     return buf
+
+
+def _pan_gains(pan: float):
+    """Equal-power left/right gains for a pan of -1 (left) .. 1 (right)."""
+    angle = (max(-1.0, min(1.0, pan)) + 1.0) * (math.pi / 4.0)
+    return math.cos(angle), math.sin(angle)
+
+
+def _channel_pans(grouped: Dict[str, List[Note]]) -> Dict[str, float]:
+    """The pan a channel sits at, from the notes placed on it (0 = centre)."""
+    pans: Dict[str, float] = {}
+    for channel_id, notes in grouped.items():
+        values = [note.pan for note in notes if note.pan]
+        if values:
+            pans[channel_id] = max(-1.0, min(1.0, sum(values) / len(values)))
+    return pans
 
 
 def _curve(value: float, nonlinear: bool) -> float:
@@ -409,68 +450,106 @@ def render(notes: List[Note], channels, options: RenderOptions,
     if options.equalise:
         gains = mix.balance(stems, mix.channel_roles(grouped))
 
-    master = [0.0] * total
-    for channel_id, buf in stems.items():
-        gain = gains.get(channel_id, 1.0)
-        if abs(gain - 1.0) < 1e-3:
+    # Stereo is only worth anything if the voices actually sit somewhere. The
+    # PC Engine can pan each channel on its own, so its notes carry a pan; the
+    # NES chips cannot, and stay in the middle. With stereo off everything is
+    # summed to mono exactly as before.
+    pans = _channel_pans(grouped) if options.stereo else {}
+    if options.stereo:
+        left = [0.0] * total
+        right = [0.0] * total
+        for channel_id, buf in stems.items():
+            gain = gains.get(channel_id, 1.0)
+            left_gain, right_gain = _pan_gains(pans.get(channel_id, 0.0))
+            left_gain *= gain
+            right_gain *= gain
             for index, value in enumerate(buf):
-                master[index] += value
-        else:
-            for index, value in enumerate(buf):
-                master[index] += value * gain
+                left[index] += value * left_gain
+                right[index] += value * right_gain
+        mixdown: List[List[float]] = [left, right]
+    else:
+        master = [0.0] * total
+        for channel_id, buf in stems.items():
+            gain = gains.get(channel_id, 1.0)
+            if abs(gain - 1.0) < 1e-3:
+                for index, value in enumerate(buf):
+                    master[index] += value
+            else:
+                for index, value in enumerate(buf):
+                    master[index] += value * gain
+        mixdown = [master]
 
-    _polish(master, options.rate, options.lowpass)
+    for channel in mixdown:
+        _polish(channel, options.rate, options.lowpass)
 
     # Give the effect chain a known level to work at, so its settings mean the
-    # same thing for a quiet tune and a loud one.
-    headroom = max((abs(value) for value in master), default=0.0)
+    # same thing for a quiet tune and a loud one. One scale for every channel:
+    # the stereo picture must not move when the level does.
+    headroom = max((max((abs(value) for value in channel), default=0.0)
+                    for channel in mixdown), default=0.0)
     if headroom > 0:
         pre = 1.0 / headroom
-        master = [value * pre for value in master]
+        for channel in mixdown:
+            channel[:] = [value * pre for value in channel]
 
     if options.echo:
-        mix.echo(master, options.rate, delay=mix.echo_delay(notes))
+        delay = mix.echo_delay(notes)
+        for channel in mixdown:
+            mix.echo(channel, options.rate, delay=delay)
     if options.compress:
-        mix.compress(master, options.rate)
+        for channel in mixdown:
+            mix.compress(channel, options.rate)
 
     # Peak-normalise, shave the transients that stick out, then normalise again:
     # the drums keep their punch and the tune comes up about 3 dB instead of being
     # turned down because one kick hit 14 dB over a square wave.
-    peak = max((abs(value) for value in master), default=0.0)
+    peak = max((max((abs(value) for value in channel), default=0.0)
+                for channel in mixdown), default=0.0)
     if peak > 0:
-        master = [value * (options.gain / peak) for value in master]
+        tight = options.gain / peak
+        for channel in mixdown:
+            channel[:] = [value * tight for value in channel]
     if options.limit:
-        mix.limit(master, options.rate,
-                  ceiling=mix.choose_ceiling(master, options.rate))
-        peak = max((abs(value) for value in master), default=0.0)
+        loudest = max(mixdown, key=lambda channel: max(
+            (abs(value) for value in channel), default=0.0))
+        ceiling = mix.choose_ceiling(loudest, options.rate)
+        for channel in mixdown:
+            mix.limit(channel, options.rate, ceiling=ceiling)
+        peak = max((max((abs(value) for value in channel), default=0.0)
+                    for channel in mixdown), default=0.0)
         if peak > 0:
-            master = [value * (options.gain / peak) for value in master]
+            tight = options.gain / peak
+            for channel in mixdown:
+                channel[:] = [value * tight for value in channel]
 
-    peak = max((abs(value) for value in master), default=0.0)
+    peak = max((max((abs(value) for value in channel), default=0.0)
+                for channel in mixdown), default=0.0)
     scale = (options.gain / peak) if peak > 0 else 1.0
 
     noise = 0x1234
     frames = bytearray()
     wide = options.bits > 8
-    for value in master:
+
+    def encode(value: float) -> bytes:
+        nonlocal noise
         shaped = _curve(value * scale, options.nonlinear)
         if options.dither:
             noise = (noise * 1103515245 + 12345) & 0x7FFFFFFF
             shaped += ((noise / 0x7FFFFFFF) - 0.5) / (4096.0 if wide else 512.0)
         shaped = max(-1.0, min(1.0, shaped))
         if wide:
-            frames += struct.pack("<h", max(-32768, min(32767,
-                                                        int(round(shaped * 32767.0)))))
-        else:
-            frames.append(max(0, min(255, int(round((shaped * 0.5 + 0.5) * 255.0)))))
+            return struct.pack("<h", max(-32768, min(32767,
+                                                     int(round(shaped * 32767.0)))))
+        return bytes([max(0, min(255, int(round((shaped * 0.5 + 0.5) * 255.0))))])
 
-    if options.stereo:
-        step = 2 if wide else 1
-        stereo = bytearray()
-        for index in range(0, len(frames), step):
-            chunk = frames[index:index + step]
-            stereo += chunk * 2
-        frames = stereo
+    if len(mixdown) == 2:
+        left, right = mixdown
+        for index in range(total):
+            frames += encode(left[index])
+            frames += encode(right[index])
+    else:
+        for value in mixdown[0]:
+            frames += encode(value)
 
     return bytes(frames), stems, duration
 

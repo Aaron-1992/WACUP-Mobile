@@ -4,10 +4,13 @@ A VGM is just a register-write timeline: exactly what a console would do, and th
 most literal proof that the arrangement fits the hardware. Two honest limitations,
 both reported by the tool:
 
-* VGM can carry the NES APU (command 0xB4, clock field 0x84) and the SN76489
-  (0x50), but it has no command for the VRC6, MMC5, FDS or Namco 163 — those
-  chips only exist inside NSFs and emulators. Notes on those channels stay in the
-  WAV rendering and are left out of the log.
+* VGM can carry the NES APU (command 0xB4, clock field 0x84) — including the
+  second APU of a "2x NES" console, which the spec calls dual chip support (bit 30
+  of the clock, bit 7 of the register address) — the SN76489 (0x50) and the
+  HuC6280 / PC Engine (0xB9, clock field 0xA4, wave RAM written through register
+  6). It has no command for the VRC6, MMC5, FDS or Namco 163: those chips only
+  exist inside NSFs and emulators, so notes on those channels stay in the WAV
+  rendering and are left out of the log.
 * The delta channel is driven as a direct DAC load (register 0x4011), i.e. an
   unpitched percussive click, because we do not ship a sampled drum ROM.
 """
@@ -20,8 +23,11 @@ from .render import note_frequency
 
 CPU_CLOCK = 1789773.0
 PSG_CLOCK = 3579545
+HUC_CLOCK = 3579545                  # the PC Engine's PSG runs from the CPU clock
+HUC_WAVE = 32                        # 32 samples of wave RAM per channel
 SAMPLES_PER_SECOND = 44100
 FRAME = 735
+SECOND_CHIP = 0x80                   # VGM: bit 7 of the address picks the 2nd chip
 
 
 def _timer(frequency: float, divisor: float) -> int:
@@ -104,6 +110,7 @@ def _collect(notes: List[Note], channels) -> Tuple[List[tuple], int, List[str]]:
     used = set()
     events: List[tuple] = []
     sample_rate = SAMPLES_PER_SECOND
+    waves_loaded: dict = {}
 
     for note in notes:
         start = int(round(note.start * sample_rate))
@@ -130,18 +137,104 @@ def _collect(notes: List[Note], channels) -> Tuple[List[tuple], int, List[str]]:
             index = int(channel[-1]) - 1
             events.append((start, 0, _psg_note(note, index), "psg"))
             events.append((end, 1, _psg_silence(index), "psg"))
+        elif channel.startswith("pce"):
+            index = int(channel[3:]) - 1
+            load, silence = _huc_note(note, index, waves_loaded)
+            events.append((start, 0, _huc(load), "huc"))
+            events.append((end, 1, _huc(silence), "huc"))
+        elif channel.startswith("nes2_"):
+            base = {"nes2_pulse1": 0x00, "nes2_pulse2": 0x04,
+                    "nes2_triangle": None, "nes2_noise": None}.get(channel)
+            if channel == "nes2_triangle":
+                events.append((start, 0, _nes(_triangle_events(note), True), "nes"))
+                events.append((end, 1, _nes([(0x08, 0x00)], True), "nes"))
+            elif channel == "nes2_noise":
+                events.append((start, 0, _nes(_noise_events(note), True), "nes"))
+                events.append((end, 1, _nes([(0x0C, 0x10)], True), "nes"))
+            elif base is not None:
+                events.append((start, 0, _nes(_pulse_events(note, base), True),
+                               "nes"))
+                events.append((end, 1, _nes(_pulse_off(base), True), "nes"))
+            else:
+                skipped.add(channel)
         else:
             skipped.add(channel)
 
+    # the PC Engine's global volume is a register of its own: open it up once,
+    # before the first note, so the channels are actually audible
+    if any(chip == "huc" for _t, _o, _p, chip in events):
+        events.append((0, -1, _huc([(0x01, 0xFF)]), "huc"))
     events.sort(key=lambda item: (item[0], item[1]))
     return events, sample_rate, sorted(skipped)
 
 
-def _nes(writes: List[Tuple[int, int]]) -> bytes:
+def _nes(writes: List[Tuple[int, int]], second: bool = False) -> bytes:
     out = bytearray()
     for address, value in writes:
-        out += bytes([0xB4, address & 0xFF, value & 0xFF])
+        address &= 0xFF
+        if second:
+            address |= SECOND_CHIP
+        out += bytes([0xB4, address, value & 0xFF])
     return bytes(out)
+
+
+def _huc(writes: List[Tuple[int, int]], second: bool = False) -> bytes:
+    """HuC6280 register writes: 0xB9 aa dd, with bit 7 of aa for a 2nd chip."""
+    out = bytearray()
+    for address, value in writes:
+        address &= 0xFF
+        if second:
+            address |= SECOND_CHIP
+        out += bytes([0xB9, address, value & 0xFF])
+    return bytes(out)
+
+
+def _huc_period(frequency: float) -> int:
+    """The 12-bit period the chip counts down: clock / (32 * frequency)."""
+    if frequency <= 0:
+        return 1
+    return max(1, min(0xFFF, int(round(HUC_CLOCK / (32.0 * frequency)))))
+
+
+def _huc_pan(pan: float) -> int:
+    """The pan register: high nibble left, low nibble right, 0xF = full."""
+    pan = max(-1.0, min(1.0, pan))
+    left = 0xF if pan <= 0 else int(round(0xF * (1.0 - pan)))
+    right = 0xF if pan >= 0 else int(round(0xF * (1.0 + pan)))
+    return ((left & 0x0F) << 4) | (right & 0x0F)
+
+
+def _huc_note(note: Note, channel: int, wave_cache: dict) -> Tuple[list, list]:
+    """(writes to load the channel, writes to silence it) for one PC Engine note.
+
+    The wave is only uploaded when the channel's wave actually changes: that is
+    exactly what a real driver does, and it keeps the log small.
+    """
+    from . import waves
+
+    latch = [(0x00, channel & 0x07)]
+    load: List[Tuple[int, int]] = list(latch)
+    if note.role == "drum":
+        # channels 5 and 6 can be switched to noise; the register also sets the rate
+        rate = max(1, min(30, 0x1F - (max(0, min(15, note.noise_period)) * 2)))
+        load += [(0x07, 0x80 | rate),
+                 (0x04, 0x80 | max(1, min(31, note.volume * 2)))]
+        silence = latch + [(0x07, 0x00), (0x04, 0x00)]
+        return load, silence
+
+    table = waves.level(note.wave)
+    if wave_cache.get(channel) != note.wave:
+        load.append((0x04, 0x00))                 # off while rewriting the RAM
+        for step in table:
+            # the register takes 5-bit unsigned: -16..15 -> 0..31
+            load.append((0x06, max(0, min(31, int(round(step * 15.0)) + 16))))
+        wave_cache[channel] = note.wave
+    period = _huc_period(note_frequency(note.pitch + note.bend))
+    load += [(0x02, period & 0xFF),
+             (0x03, (period >> 8) & 0x0F),
+             (0x05, _huc_pan(note.pan)),
+             (0x04, 0x80 | max(1, min(31, note.volume * 2)))]
+    return load, latch + [(0x04, 0x00)]
 
 
 def write_vgm(path: str, notes: List[Note], channels, duration: float,
@@ -181,10 +274,18 @@ def write_vgm(path: str, notes: List[Note], channels, duration: float,
     struct.pack_into("<I", header, 0x08, 0x171)
     if any(chip == "psg" for _t, _o, _p, chip in events):
         struct.pack_into("<I", header, 0x0C, PSG_CLOCK)     # SN76489
+    if any(chip == "huc" for _t, _o, _p, chip in events):
+        struct.pack_into("<I", header, 0xA4, HUC_CLOCK)     # HuC6280 (PC Engine)
     struct.pack_into("<I", header, 0x18, total_samples)
     struct.pack_into("<I", header, 0x24, SAMPLES_PER_SECOND)
     struct.pack_into("<I", header, 0x34, 0x100 - 0x34)      # data offset
-    struct.pack_into("<I", header, 0x84, int(CPU_CLOCK))    # NES APU clock
+    # Dual chip support: bit 30 asks the player for a second NES APU, and the
+    # second console's writes carry bit 7 in their register byte (see _nes).
+    nes_clock = int(CPU_CLOCK)
+    if any(_p and _p[0] == 0xB4 and _p[1] & SECOND_CHIP
+           for _t, _o, _p, _chip in events if _chip == "nes"):
+        nes_clock |= 0x40000000
+    struct.pack_into("<I", header, 0x84, nes_clock)         # NES APU clock
 
     with open(path, "wb") as handle:
         handle.write(bytes(header))

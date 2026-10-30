@@ -50,6 +50,10 @@ jobs:
           python -c "from nescore.demo import write_fast; write_fast('tests/fast-tune.mid')"
           python chip8bit.py --cli tests/fast-tune.mid --extensions all
           cp "tests/fast-tune [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-fast-tune.wav
+          # and the same tune on the two whole consoles, in stereo, because that
+          # is the one render you can only hear with a second APU and a PC Engine
+          python chip8bit.py --cli tests/genesis-style.mid --extensions dual,pce --stereo
+          cp "tests/genesis-style [nes+dual+pce].wav" demo/demo-2x-nes-pc-engine.wav
           ls -la demo
 
       # Artifacts keep the folder layout of what they upload, and the release job
@@ -58,7 +62,8 @@ jobs:
         working-directory: tools/nes8bit
         run: |
           mkdir -p release_assets
-          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav demo/demo-fast-tune.wav release_assets/
+          cp demo/demo-all-chips.wav demo/demo-bare-nes.wav demo/demo-fast-tune.wav \
+             demo/demo-2x-nes-pc-engine.wav release_assets/
           cp window-tracker.png window-win95.png window-amiga.png release_assets/
           ls -la release_assets
 
@@ -217,6 +222,15 @@ jobs:
             `.wav` — `<song>.mid`, the sequence as a real Standard MIDI File, and
             `<song>.sf2`, the bank's instruments and samples as a real SoundFont.
             Nothing is bundled or downloaded; every byte comes out of your ROM.
+
+            **A second NES and a PC Engine.** Two of the switches are not cartridge
+            chips but whole other consoles playing along: `2x NES` doubles the APU
+            (4 → 8 voices), and `PC Engine` adds Hudson's HuC6280 — six channels,
+            each with its own 32-step waveform in RAM, 5-bit volume and stereo pan.
+            The converter loads a different wave per instrument, so a flute, a
+            string bed and an organ are three different waveforms instead of three
+            squares, and a line with a real timbre gets those channels first. Both
+            go into the VGM log too (dual-APU bit and the HuC6280 command).
 
             Sound: drums are real samples through the delta channel, every note has
             an attack/release so nothing clicks, and the mix is balanced by role —

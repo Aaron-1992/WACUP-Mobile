@@ -3,8 +3,18 @@
 Everything is described as channels so the arranger can treat the base console and
 an extended one with the same code. Rendering knows how each kind of channel
 actually behaves on hardware (4-bit volume, stepped triangle, LFSR noise, sawtooth,
-wavetable), which is what makes the result sound like a console rather than a
-square-wave synthesiser.
+wavetable, and the PC Engine's 32-step wave RAM), which is what makes the result
+sound like a console rather than a square-wave synthesiser.
+
+Two of the entries are not expansion hardware on the same cartridge but whole
+other ways of playing the music:
+
+* ``dual`` — a second NES APU wired in parallel, as in the Famicom's own add-ons
+  and in the "2x NES" chips people build for tracking. Four more voices of exactly
+  the hardware you already know, so a tune stops losing its harmony lines;
+* ``pce`` — a Hudson HuC6280, the PC Engine's PSG: six channels, each with its own
+  32-sample waveform in RAM, 5-bit volume and per-channel stereo panning. This is
+  the console that can actually sound like the instruments the MIDI names.
 """
 
 from dataclasses import dataclass
@@ -34,9 +44,12 @@ class ChannelSpec:
 
     id: str
     chip: str
-    kind: str          # pulse | triangle | noise | saw | wavetable | fds | dmc | psg
+    kind: str          # pulse | triangle | noise | saw | wavetable | fds | dmc |
+                       # psg | huc (PC Engine wave RAM)
     priority: int      # lower wins when choosing where a melody goes
     extension: str = ""   # "" = plain NES APU; otherwise the extension that adds it
+    noise_capable: bool = False   # can be switched to noise for percussion
+    pannable: bool = False        # has a stereo volume of its own
 
 
 # ------------------------------------------------------------------ base chips
@@ -51,6 +64,30 @@ BASE_CHANNELS: List[ChannelSpec] = [
 # ------------------------------------------------------- extension chip families
 
 EXTENSION_CHANNELS: Dict[str, List[ChannelSpec]] = {
+    # A second NES APU, wired in parallel: two pulses, a triangle and a noise
+    # channel, identical to the first console's — the cheapest way to stop
+    # dropping half a tune's harmony.
+    "dual": [
+        ChannelSpec("nes2_pulse1", "nes2", "pulse", 22, "dual"),
+        ChannelSpec("nes2_pulse2", "nes2", "pulse", 32, "dual"),
+        ChannelSpec("nes2_triangle", "nes2", "triangle", 42, "dual"),
+        ChannelSpec("nes2_noise", "nes2", "noise", 9, "dual"),
+    ],
+    # Hudson HuC6280 (PC Engine): six channels, each with its own 32-step
+    # waveform, 5-bit volume and stereo panning. Channel 2 doubles as the noise
+    # channel on real hardware, which is exactly what it does here.
+    "pce": [
+        ChannelSpec("pce1", "pce", "huc", 19, "pce", pannable=True),
+        ChannelSpec("pce2", "pce", "huc", 24, "pce", pannable=True),
+        ChannelSpec("pce3", "pce", "huc", 34, "pce", pannable=True),
+        ChannelSpec("pce4", "pce", "huc", 46, "pce", pannable=True),
+        # channels 5 and 6 of the HuC6280 can be switched to noise, so drums may
+        # borrow one of them — that is the hardware's own arrangement, not ours
+        ChannelSpec("pce5", "pce", "huc", 58, "pce", noise_capable=True,
+                    pannable=True),
+        ChannelSpec("pce6", "pce", "huc", 66, "pce", noise_capable=True,
+                    pannable=True),
+    ],
     # Konami VRC6: two extra pulses and a sawtooth. The classic NES upgrade.
     "vrc6": [
         ChannelSpec("vrc6_pulse1", "vrc6", "pulse", 30, "vrc6"),
@@ -83,7 +120,30 @@ EXTENSION_CHANNELS: Dict[str, List[ChannelSpec]] = {
     ],
 }
 
-MELODIC_KINDS = {"pulse", "triangle", "saw", "fds", "wavetable", "psg"}
+MELODIC_KINDS = {"pulse", "triangle", "saw", "fds", "wavetable", "psg", "huc"}
+
+#: The order the window and the command line list the chips in: whole consoles
+#: first, then the cartridge add-ons that only ever played one or two parts.
+CHIP_ORDER: List[str] = ["dual", "pce", "vrc6", "mmc5", "fds", "n163", "psg",
+                         "dmc"]
+
+#: What each chip is called in the window.
+CHIP_LABELS: Dict[str, str] = {
+    "dual": "2x NES",
+    "pce": "PC ENGINE",
+    "vrc6": "VRC6",
+    "mmc5": "MMC5",
+    "fds": "FDS",
+    "n163": "N163",
+    "psg": "PSG",
+    "dmc": "DMC",
+}
+
+
+def ordered_extensions() -> List[str]:
+    """Every extension, in display order (a name someone stored stays valid)."""
+    return [name for name in CHIP_ORDER if name in EXTENSION_CHANNELS] + \
+           [name for name in EXTENSION_CHANNELS if name not in CHIP_ORDER]
 
 
 def build_channel_set(extensions) -> List[ChannelSpec]:
@@ -92,6 +152,12 @@ def build_channel_set(extensions) -> List[ChannelSpec]:
     for name in extensions:
         channels.extend(EXTENSION_CHANNELS.get(name, []))
     return channels
+
+
+def noise_channels(channels) -> List[ChannelSpec]:
+    """Every channel a drum can be put on: noise, delta, or a switchable PSG."""
+    return [spec for spec in channels
+            if spec.kind in ("noise", "dmc") or spec.noise_capable]
 
 
 def channel_by_id(channels, channel_id) -> ChannelSpec:

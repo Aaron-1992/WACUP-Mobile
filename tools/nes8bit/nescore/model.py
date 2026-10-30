@@ -29,6 +29,8 @@ class Note:
     drum: str = ""          # kick | snare | hat | tom | crash when role == drum
     noise_period: int = 9   # index into the APU noise period table
     noise_short: bool = False   # metallic mode: 93-step LFSR
+    wave: str = "square50"  # PC Engine wave RAM: which of the 32-step waves
+    pan: float = 0.0        # -1 left .. 1 right, 0 = centre (pannable chips)
 
     def end(self) -> float:
         return self.start + self.dur

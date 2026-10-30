@@ -16,7 +16,11 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
   and the kit is levelled like a kit instead of like eight separate files;
 * **no click-and-fizz** — every note has an attack and a release, and the mix is
   gently filtered, so it sounds like music rather than a test tone;
-* **every hardware voice is used, and extension chips can be switched on** (4 → 22);
+* **every hardware voice is used, and whole consoles can be switched on** — a
+  second NES APU (4 → 8) and a PC Engine (4 → 10), plus the cartridge chips, up to
+  32 voices. The PC Engine's six channels each load their own 32-step waveform, so
+  a flute, a string section and an organ are three different waves, not three
+  squares;
 * **channels are not crammed** — when every voice is busy the note is left out and
   counted, rather than squeezed in as an arpeggio. The melody, bass and drums always
   get a voice first, so the important line is never the one that gets dropped;
@@ -34,13 +38,18 @@ Double-click **`chip8bit.exe`**. Its own window opens (pygame/SDL — a normal d
 window, no browser anywhere), laid out like FastTracker II v2.04: one lavender desk
 with the panels **cut into** it, so nothing floats on a coloured background.
 
+![the desk with a second NES and a PC Engine switched on](docs/window-consoles.png)
+
 1. **Add music** — drag files onto the window, press *ADD MUSIC* (the real Windows
    file dialog), or drop them straight onto `chip8bit.exe`. MIDI, VGM/VGZ, GYM, a
-   Nintendo DS `.nds`/`.sdat` (see below), and `.zip` of any of those. Anything else is refused immediately with the reason
-   rather than failing halfway through a batch. *DEMO* queues a tune to play with.
+   Nintendo DS `.nds`/`.sdat` (see below), and `.zip` of any of those. Anything
+   else is refused immediately with the reason rather than failing halfway
+   through a batch. *DEMO* queues a tune to play with.
 2. **Pick chips** — the `CHIPS` box lists what each extension chip adds; `ALL` and
-   `NONE` in its title line switch the whole set. `VOICES` and `CHIPS` in the header
-   follow along (4 → 22 voices) and their arrows add or drop one chip, while `BITS`
+   `NONE` in its title line switch the whole set. The first three rows are the whole
+   consoles — `NES`, `2x NES` (a second APU) and `PC ENGINE` — and the rest are the
+   cartridge chips. `VOICES` and `CHIPS` in the header
+   follow along (4 → 32 voices) and their arrows add or drop one chip, while `BITS`
    picks 8 or 16 and `RATE` walks 22k / 32k / 44k / 48k / 96k. Every spinner in the
    header is a control that does what its number says. The choice is remembered
    between runs.
@@ -80,7 +89,7 @@ a mock-up:
 * row numbers `00`…`3F` repeated at the head of every four channels, with blue gaps
   between the groups, every fourth row striped, and the playing row highlighted and
   scrolled into view;
-* the info line: `PAT 00:12  TIME 12.4s / 153.0s  BPM 226  22 VOICES` — and if two
+* the info line: `PAT 00:12  TIME 12.4s / 153.0s  BPM 226  14 VOICES` — and if two
   notes ever want the same cell, `+9 SHARED` counts them instead of hiding them;
 * **click any row to play from there**; the row length is chosen from the music, so
   a 226 BPM tune still shows all of its notes. Wheel / Page Up/Down / arrows scroll
@@ -109,8 +118,10 @@ chip8bit-cli.exe --cli games\*.vgz --extensions all -o converted
 chip8bit-cli.exe --cli --list-extensions
 ```
 
-`--bits 8` gives you the crunch; the default is 16-bit. `--no-drums` falls back to
-the noise channel. `--no-sharing` is the default already: when no voice fits, the
+`--bits 8` gives you the crunch; the default is 16-bit. `--stereo` writes two
+channels, and with a PC Engine in the console it is real stereo: the chord and
+counter lines are panned a step or two either side of the lead, everything else
+stays centred. `--no-drums` falls back to the noise channel. `--no-sharing` is the default already: when no voice fits, the
 note is dropped and counted, never arpeggio-crammed into another channel.
 
 ## The chips you can switch on
@@ -118,6 +129,8 @@ note is dropped and counted, never arpeggio-crammed into another channel.
 | flag | adds | channels |
 | --- | --- | --- |
 | `nes` (always on) | 2A03 APU | `pulse1`, `pulse2`, `triangle`, `noise` |
+| `dual` | **a second NES APU, in parallel** | 2 pulses, a triangle and a noise channel — 8 voices of the hardware you already know |
+| `pce` | **Hudson PC Engine (HuC6280)** | 6 channels, each with its own 32-step waveform in RAM, 5-bit volume and stereo pan |
 | `vrc6` | Konami VRC6 | 2 extra pulses + a sawtooth (`vrc6_saw`) |
 | `mmc5` | Nintendo MMC5 | 2 extra pulses |
 | `fds` | Famicom Disk System | 1 wavetable channel |
@@ -125,7 +138,55 @@ note is dropped and counted, never arpeggio-crammed into another channel.
 | `psg` | SN76489 (Master System / Genesis) | 3 square channels |
 | `dmc` | APU delta channel | sampled percussion |
 
-That is 4 voices bare and 22 with everything enabled.
+That is 4 voices bare, 14 with the two consoles added, and 32 with everything on.
+
+## The two whole consoles
+
+The cartridge chips each add a voice or two. These two are a different kind of
+switch: they are another machine playing along, and they change what the converter
+can do with a file.
+
+**`dual` — a second NES.** Two more pulses, another triangle and another noise
+channel, identical to the first console's. Nothing clever: it is the cheapest way
+to stop dropping half a tune's harmony lines, and on the 226 BPM test tune it takes
+the "left out" count from 33 notes to 0. Cross-check it in a debugger against any
+"2x NES" tracker patch and the voices line up one for one.
+
+**`pce` — the PC Engine.** Six channels, and the thing that makes this console
+different: there is no fixed waveform. Each channel holds **32 samples of 5-bit
+audio in its own little RAM**, a volume that goes to 31 steps instead of 15, and a
+pan register. So the converter loads a different wave per note, from the
+instrument the MIDI names:
+
+| the file says | the wave RAM gets |
+| --- | --- |
+| flute, recorder, pan flute | a sine with a touch of second harmonic |
+| strings, ensemble, choir | a fat, sawtooth-like 6-partial wave |
+| organ | octave-stacked partials (1, 2, 4, 8) |
+| brass | bright, 5 partials, closes up as it is played |
+| piano, guitar | struck partial sets, each its own |
+| bells, glockenspiel, FX | inharmonic (1, 4, 7, 11) — metallic |
+| any "Lead" patch | the square or pulse the patch asks for |
+| bass | few partials, because a bass down there needs body, not fizz |
+
+Two more rules on top: a line whose instrument has a real timbre (flute, strings,
+organ, brass, piano, guitar…) is offered the PC Engine's channels *first* when one
+is free, and a note three octaves up gets a simpler wave, because a busy wave up
+there is aliasing rather than brightness. Channel 2 doubles as the noise channel,
+exactly as on the real hardware, so a kick or a snare can use it when the delta and
+noise channels are taken — but never by pushing the tune off it. With `--stereo`
+on, the chord and counter lines sit a couple of pan steps either side of the lead,
+and the tune and the bass stay down the middle. `--stats` prints the wave set:
+
+```
+  PC Engine wave RAM                       : FLUTE x41, STRINGS x28, ORGAN x12
+```
+
+Both go into the VGM log too, because the format has real support for them: the
+second NES APU uses the spec's dual-chip bit (bit 30 of the clock value, bit 7 of
+the register address), and the PC Engine is the HuC6280 command `0xB9` with its
+clock at header offset `0xA4` — including the 32-step wave upload, which is what
+a real driver writes. Only the VRC6/MMC5/FDS/N163 still cannot be logged.
 
 ## Nintendo DS ROMs
 
@@ -223,7 +284,10 @@ like one, so:
    lines you would actually notice — then counter-melodies and rhythm, then harmony.
    A busy file therefore never pushes the tune out of the way;
 3. melody leans on the pulses, bass takes the triangle, drums take the delta
-   channel (and the noise channel when it is enabled), harmony fills what is free;
+   channel (and the noise channels when they are enabled), harmony fills what is
+   free. On a PC Engine, a line playing a flute, a string bed, an organ or a brass
+   stab is offered the wave-RAM channels before the pulses, because that is the
+   only place the instrument exists;
 4. a note that finds nothing free is first put on **any other free voice** that
    can plausibly play it;
 5. percussion may **take a channel from a hi-hat** — a missing backbeat is worse
@@ -236,18 +300,24 @@ like one, so:
    A full-band MIDI export has five guitar parts and eleven harmony lines; that is
    not an arrangement, it is mud, so the strongest lines are kept and the rest are
    reported as thinned;
-9. anything left over is **dropped and counted**, not smuggled in — there is no
+9. a note outside what its voice can physically play (below A1 on a pulse, above
+   C7) is **moved by whole octaves** into range instead of being rendered as a
+   click or dropped — the same thing a chip composer does by hand, counted in the
+   stats as "octave-folded";
+10. anything left over is **dropped and counted**, not smuggled in — there is no
    arpeggio cramming. The header and the result card say exactly how many notes
    were left out or thinned, and where they came from.
 
-Measured on a real 226 BPM game tune (3806 notes, 2.5 minutes — the athletic-theme
-case the tests now cover with a generated stand-in):
+Measured on the generated 226 BPM stand-in for the athletic-theme case the tests
+use (360 notes, 8 seconds — small, but it is the shape of a real game tune):
 
-| chips | notes kept | left out | lines thinned | voices used |
+| chips | voices available | notes kept | left out | lines thinned |
 | --- | --- | --- | --- | --- |
-| bare NES (4) | 3335 | 286 | – | 4 |
-| + VRC6 (7) | 3435 | 186 | – | 7 |
-| all chips (22) | 2980 | 6 | 7 | 13 |
+| bare NES | 4 | 327 | 33 | – |
+| + VRC6 | 7 | 336 | 24 | – |
+| + 2× NES | 8 | 344 | 0 | 1 |
+| + PC Engine | 10 | 344 | 0 | 1 |
+| everything | 32 | 360 | 0 | 0 |
 
 On the built-in demo tune (169 notes): bare NES keeps 121 (34 left out: 24 drum,
 10 harmony), all chips keep 146 and thin one spare line. Nothing is ever dropped for
@@ -299,8 +369,9 @@ and no copyrighted sample data anywhere: the kit is maths.
 
 ## Honest limits
 
-* VGM can only address the NES APU and the SN76489, so `--export-vgm` leaves the
-  VRC6/MMC5/FDS/N163 notes out of the log. The WAV always has all of them.
+* VGM can address the NES APU (and a second one, via dual-chip support), the
+  SN76489 and the HuC6280, so `--export-vgm` leaves only the VRC6/MMC5/FDS/N163
+  notes out of the log. The WAV always has all of them.
 * The delta channel here plays the built-in kit; it is not a sample player for
   arbitrary user samples yet.
 * Supported input: MIDI (`.mid .midi .rmi .kar`), VGM/VGZ, GYM, Nintendo DS
@@ -312,7 +383,7 @@ and no copyrighted sample data anywhere: the kit is maths.
 * A DS sequence's randomised commands (`0xA0`, and anything else whose length
   cannot be worked out from the command byte) end that track with a message in the
   window rather than being guessed at — the notes before it are kept.
-* A dense orchestral MIDI will still lose inner voices: 22 monophonic voices is a
+* A dense orchestral MIDI will still lose inner voices: 32 monophonic voices is a
   hard ceiling, and the tool reports exactly what it dropped.
 
 ## Development

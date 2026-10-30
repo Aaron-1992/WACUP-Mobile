@@ -16,7 +16,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import make_test_midi                                     # noqa: E402
-from nescore import analyze, chips, convert, importers      # noqa: E402
+from nescore import analyze, chips, convert, gm, importers   # noqa: E402
+from nescore import waves as waves_module                    # noqa: E402
 from nescore import mix as mix_module                     # noqa: E402
 from nescore import samples as samples_module              # noqa: E402
 from nescore import arrange as arrange_module             # noqa: E402
@@ -24,7 +25,7 @@ from nescore.arrange import Options, arrange               # noqa: E402
 from nescore.cli import main                               # noqa: E402
 from nescore.render import (RenderOptions, render, render_channel,   # noqa: E402
                             write_wav)
-from nescore.model import Note                             # noqa: E402
+from nescore.model import Note, Song                      # noqa: E402
 from nescore.vgmout import write_vgm                       # noqa: E402
 
 FAILURES = []
@@ -125,6 +126,127 @@ def main_test() -> None:
     check("only percussion gets thinned, and only a little",
           all_stats.simplified <= 10,
           "thinned %d" % all_stats.simplified)
+
+    print("a second NES (dual) and a PC Engine in the console")
+    dual = chips.build_channel_set(["dual"])
+    check("2x NES is the base console twice over", len(dual) == 8,
+          str([spec.id for spec in dual]))
+    check("the second APU has its own pulse, triangle and noise",
+          [spec.kind for spec in dual[4:]] == ["pulse", "pulse", "triangle",
+                                               "noise"])
+    eighths, eighth_stats = arrange(song, dual, Options())
+    check("2x NES keeps more of the tune than a bare NES",
+          len(eighths) > len(base_notes),
+          "%d vs %d notes" % (len(eighths), len(base_notes)))
+    check("2x NES uses the second console's voices",
+          any(note.channel.startswith("nes2_") for note in eighths),
+          str(sorted({note.channel for note in eighths})))
+
+    pce = chips.build_channel_set(["pce"])
+    check("a PC Engine has six voices", len(pce) == 10,
+          str([spec.id for spec in pce]))
+    check("channels 5 and 6 of the PC Engine can be switched to noise",
+          [spec.id for spec in pce if spec.noise_capable] == ["pce5", "pce6"],
+          str([spec.id for spec in pce if spec.noise_capable]))
+    check("a drum never lands on a tone-only PC Engine channel",
+          all(note.channel in ("dmc", "noise", "nes2_noise", "pce5", "pce6")
+              for note in arrange(song, pce, Options())[0]
+              if note.role == "drum"),
+          str(sorted({note.channel for note in
+                      arrange(song, pce, Options())[0]
+                      if note.role == "drum"})))
+
+    print("VGM: a second APU and a PC Engine in the log")
+    dual_path = os.path.join(work, "dual.vgm")
+    dual_notes, dual_stats = arrange(song, dual, Options())
+    write_vgm(dual_path, dual_notes, dual, 8.0, ["dual"])
+    blob = open(dual_path, "rb").read()
+    clock = struct.unpack("<I", blob[0x84:0x88])[0]
+    check("the log asks for a second NES APU (dual-chip bit 30)",
+          bool(clock & 0x40000000), "0x%08X" % clock)
+    check("the second console's writes carry bit 7 of the register",
+          any(blob[index + 1] & 0x80 for index in range(0x100, len(blob) - 2)
+              if blob[index] == 0xB4),
+          "no 0xB4 with the second-chip bit")
+
+    pce_path = os.path.join(work, "pce.vgm")
+    pce_notes, _ = arrange(song, pce, Options())
+    write_vgm(pce_path, pce_notes, pce, 8.0, ["pce"])
+    blob = open(pce_path, "rb").read()
+    check("the log carries the HuC6280 clock at 0xA4",
+          struct.unpack("<I", blob[0xA4:0xA8])[0] == 3579545,
+          str(struct.unpack("<I", blob[0xA4:0xA8])[0]))
+    check("the log writes PC Engine registers (0xB9)",
+          any(blob[index] == 0xB9 for index in range(0x100, len(blob))),
+          "no 0xB9 command")
+    check("the wave RAM is uploaded, 32 samples a step",
+          blob.count(bytes([0xB9, 0x06])) >= 32,
+          str(blob.count(bytes([0xB9, 0x06]))))
+    check("the PC Engine's global volume is opened",
+          any(blob[index:index + 3] == bytes([0xB9, 0x01, 0xFF])
+              for index in range(0x100, len(blob) - 3)),
+          "no global volume write")
+    check("every PC Engine voice can pan",
+          all(spec.pannable for spec in pce[4:]),
+          str([spec.pannable for spec in pce[4:]]))
+
+    # the wave RAM: the instrument decides the waveform, not the chip
+    timbres = [(73, "huc"), (48, "huc"), (16, "huc"), (33, "huc")]
+    for program, _kind in timbres:
+        name = waves_module.for_instrument(program, "melody", 60)
+        table = waves_module.level(name)
+        check("a %s wave is 32 steps of 5-bit samples" % gm.name(program),
+              len(table) == 32 and max(abs(value) for value in table) <= 1.0,
+              "%d steps" % len(table))
+    check("a flute, a string bed and an organ get different waves",
+          len({waves_module.for_instrument(73), waves_module.for_instrument(48),
+               waves_module.for_instrument(16)}) == 3,
+          str([waves_module.for_instrument(73), waves_module.for_instrument(48),
+               waves_module.for_instrument(16)]))
+    check("a bass gets the fat bass wave",
+          waves_module.for_instrument(33, "bass", 40) == "bass")
+    check("a square-wave lead keeps a square wave",
+          waves_module.for_instrument(80).startswith("square"))
+
+    pce_song = Song(notes=[Note(start=index * 0.5, dur=0.45, pitch=60,
+                                velocity=100, part=index,
+                                program=program)
+                           for index, program in
+                           enumerate((73, 48, 16, 80, 56))]
+                    + [Note(start=0.0, dur=0.4, pitch=40, velocity=100, part=9,
+                            role="bass", program=33)],
+                    duration=2.5)
+    placed, pce_stats = arrange(pce_song, pce, Options())
+    waves_used = {note.wave for note in placed if note.channel.startswith("pce")}
+    check("the arrangement really loads several waves at once",
+          len(waves_used) >= 3, str(sorted(waves_used)))
+    check("the stats say which waves the chip was given",
+          bool(pce_stats.waves) and sum(pce_stats.waves.values()) > 0,
+          str(pce_stats.waves))
+    check("only the pannable voices sit off centre",
+          all(note.pan == 0.0 for note in placed
+              if not note.channel.startswith("pce")),
+          str([(note.channel, note.pan) for note in placed if note.pan]))
+    check("the tune and the bass stay in the middle",
+          all(note.pan == 0.0 for note in placed
+              if note.channel.startswith("pce") and note.role in ("melody", "bass")),
+          str([(note.channel, note.pan) for note in placed if note.pan]))
+
+    print("octave folding (a chip has a range, not every pitch)")
+    extremes = Song(notes=[Note(start=0.0, dur=0.4, pitch=16, velocity=100,
+                                part=1),
+                           Note(start=0.5, dur=0.4, pitch=108, velocity=100,
+                                part=2)],
+                    duration=1.0)
+    base_channels = chips.build_channel_set([])
+    fitted, fold_stats = arrange(extremes, base_channels, Options())
+    check("an unplayably low note is moved up an octave, not thrown away",
+          len(fitted) == 2, str([(n.pitch, n.channel) for n in fitted]))
+    check("the pitches landed inside what those voices can play",
+          all(24 <= note.pitch <= 96 for note in fitted),
+          str([(n.pitch, n.channel) for n in fitted]))
+    check("the folding is reported",
+          fold_stats.folded == 2, str(fold_stats.folded))
 
     print("articulation")
     legato_notes = [n for n in base_notes if n.role == "melody"]
