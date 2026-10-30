@@ -632,6 +632,7 @@ class Zone:
     sustain: int = 127
     release: int = 127
     pan: int = 64
+    psg: bool = False         # a square/noise voice: no sample behind it
 
 
 def read_bank(sbnk: bytes, wave_archive: int = 0) -> List[List[Zone]]:
@@ -660,7 +661,7 @@ def read_bank(sbnk: bytes, wave_archive: int = 0) -> List[List[Zone]]:
     return instruments
 
 
-def _note_definition(data: bytes, at: int) -> Tuple[int, int, Zone]:
+def _note_definition(data: bytes, at: int, psg: bool = False) -> Tuple[int, int, Zone]:
     """A note definition: wave, archive, root pitch, then the envelope and pan.
 
     Inside a range or regional instrument each of these is preceded by a 16-bit
@@ -670,14 +671,15 @@ def _note_definition(data: bytes, at: int) -> Tuple[int, int, Zone]:
         struct.unpack_from("<HH6B", data, at)
     return wave, archive, Zone(low=0, high=127, wave=wave, archive=archive,
                                root=root, attack=attack, decay=decay,
-                               sustain=sustain, release=release, pan=pan)
+                               sustain=sustain, release=release, pan=pan,
+                               psg=psg)
 
 
 def _read_instrument(data: bytes, kind: int, at: int,
                      wave_archive: int) -> List[Zone]:
     zones: List[Zone] = []
     if kind in (1, 2, 3):                      # a single note, whole keyboard
-        wave, archive, zone = _note_definition(data, at)
+        wave, archive, zone = _note_definition(data, at, psg=kind in (2, 3))
         zone.low, zone.high = 0, 127
         zone.archive = archive if archive < 0xFFFF else wave_archive
         zones.append(zone)
@@ -685,7 +687,8 @@ def _read_instrument(data: bytes, kind: int, at: int,
         low, high = data[at], data[at + 1]
         position = at + 2
         for pitch in range(low, high + 1):
-            _wave, archive, zone = _note_definition(data, position + 2)
+            _wave, archive, zone = _note_definition(
+                data, position + 2, psg=_u16(data, position) in (2, 3))
             zone.low = zone.high = pitch
             zone.archive = archive if archive < 0xFFFF else wave_archive
             zones.append(zone)
@@ -697,7 +700,8 @@ def _read_instrument(data: bytes, kind: int, at: int,
         for end in ends:
             if end == 0 and position != at + 8:
                 break
-            _wave, archive, zone = _note_definition(data, position + 2)
+            _wave, archive, zone = _note_definition(
+                data, position + 2, psg=_u16(data, position) in (2, 3))
             zone.low, zone.high = low, end
             zone.archive = archive if archive < 0xFFFF else wave_archive
             zones.append(zone)
@@ -856,6 +860,8 @@ def build_soundfont(archive: Archive, bank_index: int, path: str,
     for slot, zones in enumerate(instruments):
         collected = []
         for zone in zones:
+            if zone.psg:                       # no sample to carry across
+                continue
             archive_waves = waves.get(zone.archive)
             if not archive_waves:
                 continue
@@ -890,11 +896,7 @@ def build_soundfont(archive: Archive, bank_index: int, path: str,
     if not sample_headers:
         raise NdsError("this bank's samples could not be read")
 
-    for _key, _index in list(sample_ids.items()):
-        pass
-
-    if names is None:
-        names = []
+    names = names or []
     data = _sf2_bytes(pcm, sample_headers, zones_by_instrument, bank_index,
                       names)
     directory = os.path.dirname(path)

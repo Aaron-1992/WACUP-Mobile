@@ -107,7 +107,8 @@ def _typed_definition(wave: int, archive: int, root: int, **kwargs) -> bytes:
 
 
 def build_sbnk() -> bytes:
-    """Three instruments: a direct wave, a key range, and an eight-region map."""
+    """Four instruments: a direct wave, a key range, an eight-region map, and a
+    PSG square (which has no sample behind it, like the ones real banks mix in)."""
     direct = _note_definition(0, 0, 60)
     range_low, range_high = 40, 43
     ranged = bytes([range_low, range_high]) + b"".join(
@@ -117,10 +118,12 @@ def build_sbnk() -> bytes:
         _typed_definition(wave, 0, root)
         for wave, root in ((1, 48), (1, 60), (2, 40)))
 
+    psg = _note_definition(2, 0, 60)          # wave id 2 = 25% duty square
+
     header = 0x3C + 128 * 4                      # count + up to 128 entries
     offsets = []
     blob = bytearray()
-    for chunk in (direct, ranged, regions):
+    for chunk in (direct, ranged, regions, psg):
         offsets.append(header + len(blob))
         blob += chunk
 
@@ -128,10 +131,10 @@ def build_sbnk() -> bytes:
     data = bytearray()
     data += _std_header(b"SBNK", total)
     data += b"DATA" + struct.pack("<I", total - 0x10) + b"\x00" * 32
-    data += struct.pack("<I", 3)
+    data += struct.pack("<I", 4)
     for slot in range(128):
         if slot < len(offsets):
-            kind = (1, 16, 17)[slot]              # direct, key range, regions
+            kind = (1, 16, 17, 2)[slot]           # direct, range, regions, PSG
             data += struct.pack("<BHB", kind, offsets[slot], 0)
         else:
             data += struct.pack("<BHB", 0, 0, 0)

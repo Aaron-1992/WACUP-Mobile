@@ -457,8 +457,11 @@ def main_test() -> None:
 
     print("DS banks and samples")
     zones = nds.read_bank(ds_archive.banks[0].sbnk)
-    check("three instruments in the bank", sum(1 for z in zones if z) == 3,
+    check("four instruments in the bank", sum(1 for z in zones if z) == 4,
           str(sum(1 for z in zones if z)))
+    check("a PSG square instrument is marked as having no sample",
+          len(zones[3]) == 1 and zones[3][0].psg
+          and not zones[0][0].psg)
     check("a direct instrument covers the whole keyboard",
           [(z.low, z.high, z.wave, z.root) for z in zones[0]] == [(0, 127, 0, 60)],
           str([(z.low, z.high, z.wave, z.root) for z in zones[0]]))
