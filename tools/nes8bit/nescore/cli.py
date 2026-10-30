@@ -26,18 +26,24 @@ VERSION = "1.0"
 def _extension_help() -> str:
     formats = ["  %s : %s" % (name, label) for name, label in importers.available()]
     lines = ["Input formats:", *formats, "  zip : first MIDI/VGM/GYM inside", "",
-             "NES base console: pulse1, pulse2, triangle, noise", "", "Extension chips:"]
+             "The NES APU is on by default; --no-nes leaves it out, so one of the",
+             "whole consoles below becomes the machine:",
+             "  nes    +4 channels : pulse1, pulse2, triangle, noise (2A03)",
+             "  dual   +4 channels : a second NES APU, wired in parallel",
+             "  pce    +6 channels : PC Engine / HuC6280 — wave RAM, 5-bit volume,",
+             "                       stereo pan; channels 5 and 6 can go to noise",
+             "",
+             "Cartridge chips (they need a console under them):"]
     for name in chips.ordered_extensions():
+        if name in chips.CONSOLES:
+            continue
         specs = chips.EXTENSION_CHANNELS[name]
-        kinds = ", ".join("%s (%s)" % (s.id, s.kind) for s in specs)
+        kinds = ", ".join("%s (%s)" % (spec.id, spec.kind) for spec in specs)
         lines.append("  %-6s +%d channel%s : %s" %
                      (name, len(specs), "" if len(specs) == 1 else "s", kinds))
-    lines += [
-        "",
-        "  dual = a second NES APU (8 voices of the hardware you know)",
-        "  pce  = PC Engine / HuC6280: six channels, each with its own 32-step",
-        "         waveform, 5-bit volume and stereo pan",
-    ]
+    lines += ["", "e.g.  --extensions pce --no-nes      a PC Engine on its own",
+              "      --extensions dual,pce          a second NES and a PC Engine",
+              "      --extensions all              everything, 32 voices"]
     return "\n".join(lines)
 
 
@@ -58,16 +64,19 @@ def _parse_extensions(value):
     return chosen
 
 
-def _tag(extensions) -> str:
-    return "nes" if not extensions else "nes+" + "+".join(extensions)
+def _tag(extensions, base: bool = True) -> str:
+    """What the file name says: the console(s) and chips, in a stable order."""
+    names = (["nes"] if base else []) + \
+            [name for name in chips.ordered_extensions() if name in extensions]
+    return "+".join(names) or "silent"
 
 
 def _output_path(source: str, out_argument: str, extensions, suffix: str,
-                 multiple: bool, label: str = "") -> str:
+                 multiple: bool, label: str = "", base: bool = True) -> str:
     stem = os.path.splitext(os.path.basename(source))[0]
     if label:
         stem = "%s %s" % (stem, convert._plain_name(label))
-    named = "%s [%s]%s" % (stem, _tag(extensions), suffix)
+    named = "%s [%s]%s" % (stem, _tag(extensions, base), suffix)
 
     if not out_argument:
         return os.path.join(os.path.dirname(source), named)
@@ -133,7 +142,7 @@ def _list_songs(inputs) -> int:
 
 
 def _convert(source: str, args, extensions, channels, multiple: bool = False,
-             sequence: str = "", bank: str = "") -> int:
+             sequence: str = "", bank: str = "", base: bool = True) -> int:
     started = time.time()
     choice = _SourceChoice(sequence or getattr(args, "sequence", ""),
                            bank or getattr(args, "bank", ""))
@@ -189,7 +198,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
     song_label = getattr(song, "ds_song", "") if getattr(
         song, "ds_song_count", 0) > 1 else ""
     target = _output_path(source, args.output, extensions, ".wav", multiple,
-                          song_label)
+                          song_label, base)
     write_wav(target, pcm, render_options)
 
     # A DS ROM gives up its own MIDI and SoundFont as well, so the same music can
@@ -203,7 +212,8 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
 
     if args.export_vgm:
         vgm_target = os.path.splitext(target)[0] + ".vgm"
-        for message in write_vgm(vgm_target, notes, channels, duration, extensions):
+        for message in write_vgm(vgm_target, notes, channels, duration, extensions,
+                                 base):
             print("  ! %s" % message)
         print("  > %s" % vgm_target)
 
@@ -213,7 +223,8 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
         print("  what the file contains:")
         for line in analysis.summary_lines():
             print("    " + line)
-        print("  chips: %s" % (", ".join(extensions) or "plain NES"))
+        on = (("nes" if base else "") + " " + " ".join(extensions)).split()
+        print("  chips: %s" % (", ".join(on) or "nothing"))
         for line in stats.as_lines():
             print(line)
         print("  rendered %.1fs of audio in %.2fs (%dx realtime)"
@@ -236,6 +247,10 @@ def main(argv=None) -> int:
                         help="chips to enable, comma separated: dual (a second "
                              "NES APU), pce (PC Engine), vrc6, mmc5, fds, n163, "
                              "dmc, psg, or 'all'")
+    parser.add_argument("--no-nes", action="store_true",
+                        help="leave the first NES APU out: with --extensions pce "
+                             "that is a PC Engine on its own (6 voices), with "
+                             "--extensions dual a single second APU")
     parser.add_argument("--list-extensions", action="store_true",
                         help="show the chips and the channels they add, then exit")
     parser.add_argument("--stats", action="store_true", help="report what went where")
@@ -307,7 +322,14 @@ def main(argv=None) -> int:
         return 0
 
     extensions = _parse_extensions(args.extensions)
-    channels = chips.build_channel_set(extensions)
+    base = not args.no_nes
+    if not chips.has_console(extensions, base):
+        raise SystemExit(
+            "there is no console to play on: --no-nes switches the NES off, so "
+            "one of the whole consoles has to be on as well, e.g.\n"
+            "  --no-nes --extensions pce      (a PC Engine on its own)\n"
+            "  --no-nes --extensions dual     (one NES APU on its own)")
+    channels = chips.build_channel_set(extensions, base=base)
 
     sources = []
     for item in args.inputs:
@@ -339,7 +361,7 @@ def main(argv=None) -> int:
         print("\n[%d/%d] %s" % (index, len(sources), title))
         try:
             failures += _convert(source, args, extensions, channels,
-                                 len(sources) > 1, sequence, bank)
+                                 len(sources) > 1, sequence, bank, base)
         except SystemExit:
             raise
         except Exception as error:            # keep batch conversion going

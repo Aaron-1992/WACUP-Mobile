@@ -146,12 +146,27 @@ def ordered_extensions() -> List[str]:
            [name for name in EXTENSION_CHANNELS if name not in CHIP_ORDER]
 
 
-def build_channel_set(extensions) -> List[ChannelSpec]:
-    """Every voice available for a run, base APU first."""
-    channels = list(BASE_CHANNELS)
+#: The chips that are a whole console rather than an add-on to one. A run needs
+#: at least one of these: a VRC6 with no NES under it is not a machine.
+CONSOLES: List[str] = ["dual", "pce"]
+
+
+def build_channel_set(extensions, base: bool = True) -> List[ChannelSpec]:
+    """Every voice available for a run.
+
+    ``base`` is the first NES APU, which is on by default and can be switched off:
+    a PC Engine arrangement should be six PC Engine voices, not a NES with six
+    extras bolted on.
+    """
+    channels = list(BASE_CHANNELS) if base else []
     for name in extensions:
         channels.extend(EXTENSION_CHANNELS.get(name, []))
     return channels
+
+
+def has_console(extensions, base: bool) -> bool:
+    """Is there a whole console to play on?"""
+    return bool(base) or any(name in CONSOLES for name in extensions)
 
 
 def noise_channels(channels) -> List[ChannelSpec]:

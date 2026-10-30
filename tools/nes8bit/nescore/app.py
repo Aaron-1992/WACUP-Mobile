@@ -262,6 +262,7 @@ class App:
             return settings, look
         settings.extensions = [name for name in saved.get("extensions", [])
                                if name in chips.EXTENSION_CHANNELS]
+        settings.base = bool(saved.get("base", True))
         settings.bits = 16 if saved.get("bits", 16) != 8 else 8
         settings.export_vgm = bool(saved.get("export_vgm", False))
         settings.sharing = False        # never resurrect arpeggio cramming
@@ -274,6 +275,7 @@ class App:
             with open(self.settings_path, "w", encoding="utf-8") as handle:
                 json.dump({
                     "extensions": list(self.settings.extensions),
+                    "base": self.settings.base,
                     "bits": self.settings.bits,
                     "export_vgm": self.settings.export_vgm,
                     "sharing": self.settings.sharing,
@@ -883,20 +885,68 @@ class App:
         self._save_settings()
 
     def toggle_chip(self, name: str) -> None:
+        """Switch one chip on or off.
+
+        "nes" is the first NES APU, which is a chip like any other: a PC Engine
+        arrangement is six PC Engine voices, not a NES with six extras bolted on.
+        The one rule is that a console has to be left: an empty desk cannot
+        convert anything.
+        """
+        if name == "nes":
+            if self.settings.base:
+                if not any(other in self.settings.extensions
+                           for other in chips.CONSOLES):
+                    self.status = ("That is the only console on — switch on "
+                                   "PC ENGINE (or 2x NES) first")
+                    self.status_error = True
+                    return
+                self.settings.base = False
+            else:
+                self.settings.base = True
+            self._save_settings()
+            self.status = "Playing on %s" % self.console_label()
+            self.status_error = False
+            return
         if name in self.settings.extensions:
+            if name in chips.CONSOLES and len(self.settings.extensions) == 1 \
+                    and not self.settings.base:
+                self.status = ("That is the only console on — switch on NES or "
+                               "another console first")
+                self.status_error = True
+                return
             self.settings.extensions.remove(name)
         else:
             self.settings.extensions.append(name)
         self._save_settings()
+        self.status = "Playing on %s" % self.console_label()
+        self.status_error = False
+
+    def console_label(self) -> str:
+        """What the console currently is, for the status line and the header."""
+        names = ["THE NES"] if self.settings.base else []
+        names += [chips.CHIP_LABELS.get(name, name.upper())
+                  for name in self.settings.extensions
+                  if name in chips.CONSOLES]
+        extra = [name for name in self.settings.extensions
+                 if name not in chips.CONSOLES]
+        if extra:
+            names.append("%d CARTRIDGE CHIP%s" % (len(extra),
+                                                  "" if len(extra) == 1 else "S"))
+        return " + ".join(names) or "nothing at all"
 
     def all_chips(self) -> None:
-        if len(self.settings.extensions) == len(chips.EXTENSION_CHANNELS):
+        """Everything on: both consoles and every cartridge chip."""
+        if len(self.settings.extensions) == len(chips.EXTENSION_CHANNELS) \
+                and self.settings.base:
             self.settings.extensions = []
         else:
+            self.settings.base = True
             self.settings.extensions = chips.ordered_extensions()
         self._save_settings()
 
     def no_chips(self) -> None:
+        """Nothing but one NES — the plain four-voice console."""
+        self.settings.base = True
         self.settings.extensions = []
         self._save_settings()
 
@@ -949,10 +999,15 @@ class App:
         self.settings.sampled_drums = not self.settings.sampled_drums
         self._save_settings()
 
+    def chip_count(self) -> int:
+        """How many chips are on, counting the NES APU when it is one of them."""
+        return (1 if self.settings.base else 0) + len(self.settings.extensions)
+
     def voice_count(self) -> int:
-        return 4 + sum(len(chips.EXTENSION_CHANNELS[name])
-                       for name in self.settings.extensions
-                       if name in chips.EXTENSION_CHANNELS)
+        return (4 if self.settings.base else 0) + sum(
+            len(chips.EXTENSION_CHANNELS[name])
+            for name in self.settings.extensions
+            if name in chips.EXTENSION_CHANNELS)
 
     # ---------------------------------------------------------------- geometry
 
@@ -1073,7 +1128,7 @@ class App:
         value_box(left.x + 8, left.y + 20, 116, "VOICES",
                   "%02d" % self.voice_count(), more_chips, fewer_chips)
         value_box(left.x + 134, left.y + 20, 108, "CHIPS",
-                  "%02d" % (1 + len(self.settings.extensions)),
+                  "%02d" % self.chip_count(),
                   more_chips, fewer_chips)
         value_box(left.x + 8, left.y + 62, 116, "BITS",
                   "%02d" % self.settings.bits,
@@ -1187,10 +1242,9 @@ class App:
         area = pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6)
 
         result, _channels, _row_seconds, _rows, grid = self._pattern_data()
-        active = [spec.id for spec in
-                  chips.build_channel_set(self.settings.extensions)]
+        active = [spec.id for spec in self.settings.channels()]
         every = [spec.id for spec in
-                 chips.build_channel_set(list(chips.EXTENSION_CHANNELS))]
+                 chips.build_channel_set(chips.ordered_extensions())]
 
         # Two rows of sixteen holds every voice the console can have (4 APU +
         # the cartridge chips + a second NES + a PC Engine = 32). It used to be
@@ -1289,8 +1343,7 @@ class App:
         if result is None or not getattr(result, "notes", None):
             return None, [], 0.0, 0, {}
         tempo = float(getattr(result, "tempo", 0.0) or 120.0)
-        channels = [spec.id for spec in
-                    chips.build_channel_set(self.settings.extensions)]
+        channels = [spec.id for spec in self.settings.channels()]
         for note in result.notes:
             if note.channel and note.channel not in channels:
                 channels.append(note.channel)
@@ -1616,11 +1669,12 @@ class App:
             y += button_h + gap
 
         # --- chips: two columns, one row per chip, like FT2's button blocks
-        # The whole consoles get a line of their own — they are not cartridge
-        # chips, they are a second NES and a PC Engine — and the cartridge
-        # add-ons share the two columns underneath. Full-width rows also give
-        # names like "PC ENGINE" room to be read instead of truncated.
-        entries = [("", "NES", 4, True),
+        # The consoles get a line of their own — the NES APU itself, a second
+        # NES and a PC Engine — and the cartridge add-ons share the two columns
+        # underneath. Every row is a switch, the NES included: a PC Engine with
+        # the NES off is six PC Engine voices. Full-width rows also give names
+        # like "PC ENGINE" room to be read instead of truncated.
+        entries = [("nes", "NES", 4, True),
                    ("dual", chips.CHIP_LABELS["dual"],
                     len(chips.EXTENSION_CHANNELS["dual"]), True),
                    ("pce", chips.CHIP_LABELS["pce"],
@@ -1654,8 +1708,9 @@ class App:
                 column += 1
                 if column >= 2:
                     column, line = 0, line + 1
-            on = name == "" or name in self.settings.extensions
-            if row.collidepoint(self.mouse) and name:
+            on = (self.settings.base if name == "nes"
+                  else name in self.settings.extensions)
+            if row.collidepoint(self.mouse):
                 self.screen.fill(t.playing, row)
             self._text(row.x + 4, row.y + (row_h - 16) // 2, "%02d" % (index + 1),
                        "head", t.pattern_vol if on else t.pattern_empty)
@@ -1671,8 +1726,7 @@ class App:
                        _fit(self.fonts["small"], label, room), "small",
                        t.field_text if on else t.pattern_empty)
             self.chip_rects.append((name, row.copy()))
-            if name:
-                self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
+            self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
 
         # --- queue: one row per file with its own status, so a batch is visible
         rest = rect.bottom - chips_box.bottom - 6
@@ -2036,8 +2090,8 @@ class App:
                  ("PLAYING" if self.playing is not None else "READY"))
         state_surface = self.fonts["button"].render(state, t.smooth, t.text)
         voices = self.fonts["small"].render(
-            "%d voices · %d chips" % (self.voice_count(),
-                                      1 + len(self.settings.extensions)),
+            "%d voices · %d chip%s" % (self.voice_count(), self.chip_count(),
+                                       "" if self.chip_count() == 1 else "s"),
             t.smooth, t.dim)
         right = inner.right - state_surface.get_width() - 14
         self.screen.blit(state_surface, (inner.right - state_surface.get_width(), inner.y))
@@ -2395,6 +2449,35 @@ def selftest(screenshot: Optional[str] = None) -> int:
             if name in rows:
                 click(rows[name])          # leave them off for the next checks
         app.no_chips()
+
+        # --- the NES is a switch too: a PC Engine is a PC Engine on its own
+        app.no_chips()
+        app.draw()
+        rows = dict(app.chip_rects)
+        click(rows["nes"])
+        check("the last console cannot be switched off",
+              app.settings.base and app.voice_count() >= 4 and app.status_error,
+              "%s / %s" % (app.settings.base, app.status))
+        click(rows["pce"])
+        click(rows["nes"])
+        check("with a PC Engine on, the NES can be switched off",
+              not app.settings.base and app.voice_count() == 6,
+              "%s voices, base=%s" % (app.voice_count(), app.settings.base))
+        check("a PC Engine on its own has only PC Engine voices",
+              [spec.id for spec in app.settings.channels()] ==
+              ["pce1", "pce2", "pce3", "pce4", "pce5", "pce6"],
+              str([spec.id for spec in app.settings.channels()]))
+        check("and its files are named for it, not for a NES",
+              app.settings.tag() == "pce", app.settings.tag())
+        click(rows["pce"])
+        check("the PC Engine cannot be the thing you switch off last",
+              app.settings.extensions == ["pce"],
+              str(app.settings.extensions))
+        app.no_chips()
+        check("NONE brings the plain four-voice NES back",
+              app.settings.base and not app.settings.extensions and
+              app.voice_count() == 4,
+              "%s voices, base=%s" % (app.voice_count(), app.settings.base))
 
         # --- the header spinners must do what their numbers say
         app.draw()

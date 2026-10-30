@@ -19,6 +19,7 @@ class Settings:
     """Everything the window lets you change, in one small object."""
 
     extensions: List[str] = field(default_factory=list)
+    base: bool = True              # the first NES APU; can be switched off
     bits: int = 16
     rate: int = 44100
     arp_frames: int = 2
@@ -35,13 +36,18 @@ class Settings:
     sequence: str = ""              # which song inside a bank archive (DS ROMs)
     bank: str = ""                  # which instrument bank to take with it
 
+    def chips(self):
+        """The extension chips that are switched on, in display order."""
+        chosen = [name for name in self.extensions if name in chips.EXTENSION_CHANNELS]
+        return [name for name in chips.ordered_extensions() if name in chosen]
+
     def channels(self):
-        return chips.build_channel_set(
-            [name for name in self.extensions if name in chips.EXTENSION_CHANNELS])
+        return chips.build_channel_set(self.chips(), base=self.base)
 
     def tag(self) -> str:
-        names = [name for name in self.extensions if name in chips.EXTENSION_CHANNELS]
-        return "nes" if not names else "nes+" + "+".join(names)
+        """What the file name says the music was played on."""
+        names = (["nes"] if self.base else []) + self.chips()
+        return "+".join(names) or "silent"
 
     def arrange_options(self) -> Options:
         return Options(
@@ -187,6 +193,11 @@ def convert_file(source: str, settings: Settings,
 
     report("Arranging for the chip", 0.3)
     channels = settings.channels()
+    if not channels:
+        result.ok = False
+        result.error = ("no chip is switched on — a console has to be on to "
+                        "play the music")
+        return result
     notes, stats = arrange(song, channels, settings.arrange_options(),
                            analysis=analysis)
     if not notes:

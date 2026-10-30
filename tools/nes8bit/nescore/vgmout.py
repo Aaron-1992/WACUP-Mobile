@@ -238,7 +238,7 @@ def _huc_note(note: Note, channel: int, wave_cache: dict) -> Tuple[list, list]:
 
 
 def write_vgm(path: str, notes: List[Note], channels, duration: float,
-              extensions) -> List[str]:
+              extensions, base: bool = True) -> List[str]:
     events, _rate, skipped = _collect(notes, channels)
 
     data = bytearray()
@@ -285,6 +285,10 @@ def write_vgm(path: str, notes: List[Note], channels, duration: float,
     if any(_p and _p[0] == 0xB4 and _p[1] & SECOND_CHIP
            for _t, _o, _p, _chip in events if _chip == "nes"):
         nes_clock |= 0x40000000
+    # a PC Engine built with --no-nes must not claim a NES APU clock the player
+    # would then have to drive with no writes
+    if not base and not any(_chip == "nes" for _t, _o, _p, _chip in events):
+        nes_clock = 0
     struct.pack_into("<I", header, 0x84, nes_clock)         # NES APU clock
 
     with open(path, "wb") as handle:

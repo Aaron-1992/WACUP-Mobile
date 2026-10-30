@@ -18,7 +18,9 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
   gently filtered, so it sounds like music rather than a test tone;
 * **every hardware voice is used, and whole consoles can be switched on** — a
   second NES APU (4 → 8) and a PC Engine (4 → 10), plus the cartridge chips, up to
-  32 voices. The PC Engine's six channels each load their own 32-step waveform, so
+  32 voices. Any of the three consoles can be switched off, so `PC Engine` with the
+  NES off is *six PC Engine voices* — a PC Engine arrangement, not a NES with six
+  extras — and its file is named `[pce]`, not `[nes+pce]`. The PC Engine's six channels each load their own 32-step waveform, so
   a flute, a string section and an organ are three different waves, not three
   squares;
 * **channels are not crammed** — when every voice is busy the note is left out and
@@ -45,10 +47,13 @@ with the panels **cut into** it, so nothing floats on a coloured background.
    Nintendo DS `.nds`/`.sdat` (see below), and `.zip` of any of those. Anything
    else is refused immediately with the reason rather than failing halfway
    through a batch. *DEMO* queues a tune to play with.
-2. **Pick chips** — the `CHIPS` box lists what each extension chip adds; `ALL` and
-   `NONE` in its title line switch the whole set. The first three rows are the whole
-   consoles — `NES`, `2x NES` (a second APU) and `PC ENGINE` — and the rest are the
-   cartridge chips. `VOICES` and `CHIPS` in the header
+2. **Pick chips** — the `CHIPS` box lists what each chip adds, and every row is a
+   switch; `ALL` and `NONE` in its title line switch the whole set. The first three
+   rows are the consoles — `NES` (the plain 2A03, on to start with), `2x NES` (a
+   second APU) and `PC ENGINE` — and the rest are the cartridge chips. Clicking
+   `NES` off leaves the others playing on their own: `PC ENGINE` alone is a PC
+   Engine, six voices, no APU. A console has to stay on, so the last one cannot be
+   switched off — the status line says why instead of leaving you with nothing. `VOICES` and `CHIPS` in the header
    follow along (4 → 32 voices) and their arrows add or drop one chip, while `BITS`
    picks 8 or 16 and `RATE` walks 22k / 32k / 44k / 48k / 96k. Every spinner in the
    header is a control that does what its number says. The choice is remembered
@@ -115,8 +120,14 @@ Everything happens on your machine; nothing is uploaded and no port is opened.
 ```
 chip8bit-cli.exe --cli song.mid --extensions vrc6,mmc5,fds --stats
 chip8bit-cli.exe --cli games\*.vgz --extensions all -o converted
+chip8bit-cli.exe --cli song.mid --no-nes --extensions pce --stereo
 chip8bit-cli.exe --cli --list-extensions
 ```
+
+`--no-nes` takes the first NES APU out of the console. With `--extensions pce` that
+is a PC Engine on its own (six voices, `song [pce].wav`); with `--extensions dual`
+it is the second APU alone (`song [dual].wav`); with no console left over the run
+is refused and says so.
 
 `--bits 8` gives you the crunch; the default is 16-bit. `--stereo` writes two
 channels, and with a PC Engine in the console it is real stereo: the chord and
@@ -128,7 +139,7 @@ note is dropped and counted, never arpeggio-crammed into another channel.
 
 | flag | adds | channels |
 | --- | --- | --- |
-| `nes` (always on) | 2A03 APU | `pulse1`, `pulse2`, `triangle`, `noise` |
+| `nes` (on unless `--no-nes`) | 2A03 APU | `pulse1`, `pulse2`, `triangle`, `noise` |
 | `dual` | **a second NES APU, in parallel** | 2 pulses, a triangle and a noise channel — 8 voices of the hardware you already know |
 | `pce` | **Hudson PC Engine (HuC6280)** | 6 channels, each with its own 32-step waveform in RAM, 5-bit volume and stereo pan |
 | `vrc6` | Konami VRC6 | 2 extra pulses + a sawtooth (`vrc6_saw`) |
@@ -138,7 +149,8 @@ note is dropped and counted, never arpeggio-crammed into another channel.
 | `psg` | SN76489 (Master System / Genesis) | 3 square channels |
 | `dmc` | APU delta channel | sampled percussion |
 
-That is 4 voices bare, 14 with the two consoles added, and 32 with everything on.
+That is 4 voices bare, 14 with the two consoles added, and 32 with everything on —
+and the NES itself is one of the switches, not the floor everything else sits on.
 
 ## The two whole consoles
 
@@ -172,15 +184,24 @@ instrument the MIDI names:
 Two more rules on top: a line whose instrument has a real timbre (flute, strings,
 organ, brass, piano, guitar…) is offered the PC Engine's channels *first* when one
 is free, and a note three octaves up gets a simpler wave, because a busy wave up
-there is aliasing rather than brightness. Channel 2 doubles as the noise channel,
-exactly as on the real hardware, so a kick or a snare can use it when the delta and
-noise channels are taken — but never by pushing the tune off it. With `--stereo`
+there is aliasing rather than brightness. Channels 5 and 6 switch to noise,
+exactly as on the real hardware, so a kick or a snare can use them when the delta
+and noise channels are taken — but never by pushing the tune off them. With `--stereo`
 on, the chord and counter lines sit a couple of pan steps either side of the lead,
 and the tune and the bass stay down the middle. `--stats` prints the wave set:
 
 ```
   PC Engine wave RAM                       : FLUTE x41, STRINGS x28, ORGAN x12
 ```
+
+![a PC Engine with the NES switched off: six PC Engine voices, `tune [pce].wav`](docs/window-pce-only.png)
+
+**The NES is a switch as well.** `2x NES` and `PC ENGINE` are not extras hung off
+the 2A03: click `NES` off and the console is whatever is left. `PC ENGINE` on its
+own is six PC Engine voices (`[pce]` in the file name, `--stereo` for the panning),
+`2x NES` on its own is the second APU's four voices (`[dual]`), and both together
+are ten. A click that would leave no console at all is refused with a reason in the
+status line rather than leaving you with an empty desk.
 
 Both go into the VGM log too, because the format has real support for them: the
 second NES APU uses the spec's dual-chip bit (bit 30 of the clock value, bit 7 of
@@ -314,10 +335,16 @@ use (360 notes, 8 seconds — small, but it is the shape of a real game tune):
 | chips | voices available | notes kept | left out | lines thinned |
 | --- | --- | --- | --- | --- |
 | bare NES | 4 | 327 | 33 | – |
+| second APU alone (`--no-nes --extensions dual`) | 4 | 327 | 33 | – |
+| PC Engine alone (`--no-nes --extensions pce`) | 6 | 359 | 1 | – |
 | + VRC6 | 7 | 336 | 24 | – |
 | + 2× NES | 8 | 344 | 0 | 1 |
 | + PC Engine | 10 | 344 | 0 | 1 |
 | everything | 32 | 360 | 0 | 0 |
+
+(The "lines thinned" budget only switches on from eight voices up — with four or
+six voices there is not enough room for mud, so channel contention alone decides
+and nothing is thrown away on purpose.)
 
 On the built-in demo tune (169 notes): bare NES keeps 121 (34 left out: 24 drum,
 10 harmony), all chips keep 146 and thin one spare line. Nothing is ever dropped for

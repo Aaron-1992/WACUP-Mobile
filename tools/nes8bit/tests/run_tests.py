@@ -190,6 +190,20 @@ def main_test() -> None:
           all(spec.pannable for spec in pce[4:]),
           str([spec.pannable for spec in pce[4:]]))
 
+    # a PC Engine with the NES switched off must not claim a NES APU it never uses
+    alone_path = os.path.join(work, "pce-alone.vgm")
+    alone = chips.build_channel_set(["pce"], base=False)
+    alone_notes, _ = arrange(song, alone, Options())
+    write_vgm(alone_path, alone_notes, alone, 8.0, ["pce"], base=False)
+    blob = open(alone_path, "rb").read()
+    check("a PC Engine on its own logs no NES APU clock",
+          struct.unpack("<I", blob[0x84:0x88])[0] == 0,
+          str(struct.unpack("<I", blob[0x84:0x88])[0]))
+    body = blob[0x100:]
+    check("and writes no NES APU registers at all", 0xB4 not in body,
+          "found 0xB4 in a PC Engine only log")
+    check("while still writing the PC Engine", 0xB9 in body)
+
     # the wave RAM: the instrument decides the waveform, not the chip
     timbres = [(73, "huc"), (48, "huc"), (16, "huc"), (33, "huc")]
     for program, _kind in timbres:
@@ -231,6 +245,63 @@ def main_test() -> None:
           all(note.pan == 0.0 for note in placed
               if note.channel.startswith("pce") and note.role in ("melody", "bass")),
           str([(note.channel, note.pan) for note in placed if note.pan]))
+
+    print("a PC Engine on its own (the NES switched off)")
+    pure = chips.build_channel_set(["pce"], base=False)
+    check("--no-nes leaves six PC Engine voices and no APU",
+          [spec.id for spec in pure] == ["pce1", "pce2", "pce3", "pce4",
+                                         "pce5", "pce6"],
+          str([spec.id for spec in pure]))
+    pure_settings = convert.Settings(extensions=["pce"], base=False)
+    check("a pure PC Engine is tagged as one", pure_settings.tag() == "pce",
+          pure_settings.tag())
+    check("the NES is the default console",
+          convert.Settings().tag() == "nes" and
+          len(convert.Settings().channels()) == 4)
+    check("nothing on is not a console",
+          not chips.has_console([], False) and
+          chips.has_console([], True) and chips.has_console(["pce"], False) and
+          not chips.has_console(["vrc6"], False),
+          "has_console does not discriminate")
+
+    pure_dir = os.path.join(work, "pure-pce")
+    pure_result = convert.convert_file(
+        midi_path, pure_settings, output_dir=pure_dir)
+    check("a pure PC Engine converts", pure_result.ok, pure_result.error)
+    check("and every note landed on a PC Engine channel",
+          all(note.channel.startswith("pce") for note in pure_result.notes),
+          str(sorted({note.channel for note in pure_result.notes})))
+    check("the APU's voices are nowhere in it",
+          not any(note.channel in ("pulse1", "pulse2", "triangle", "noise")
+                  for note in pure_result.notes))
+    check("the file is named for the PC Engine, not a NES",
+          os.path.basename(pure_result.wav_path).endswith("[pce].wav"),
+          os.path.basename(pure_result.wav_path or ""))
+    check("a PC Engine arrangement without a NES is not a NES + 6",
+          pure_result.voices <= 6, str(pure_result.voices))
+
+    mono = convert.convert_file(
+        midi_path, convert.Settings(extensions=["pce"], base=False),
+        output_path=os.path.join(work, "pure-mono.wav"))
+    wide = convert.convert_file(
+        midi_path, convert.Settings(extensions=["pce"], base=False, stereo=True),
+        output_path=os.path.join(work, "pure-stereo.wav"))
+    with wave.open(wide.wav_path) as handle:
+        wide_frames = handle.getnframes()
+        wide_data = handle.readframes(wide_frames)
+        channels_wide = handle.getnchannels()
+    samples = struct.unpack("<%dh" % (len(wide_data) // 2), wide_data)
+    left, right = samples[0::2], samples[1::2]
+    width = math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)) /
+                      max(1, len(left)))
+    check("a pure PC Engine can be rendered in stereo", channels_wide == 2 and
+          mono.ok and wide.ok, str(channels_wide))
+    check("and the stereo really has width", width > 100.0, "%.0f" % width)
+
+    silent = convert.convert_file(
+        midi_path, convert.Settings(base=False), output_dir=pure_dir)
+    check("switching everything off is refused with a reason, not a crash",
+          not silent.ok and "no chip" in silent.error.lower(), silent.error)
 
     print("octave folding (a chip has a range, not every pitch)")
     extremes = Song(notes=[Note(start=0.0, dur=0.4, pitch=16, velocity=100,

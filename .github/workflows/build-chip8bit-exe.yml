@@ -56,6 +56,10 @@ jobs:
           # is the one render you can only hear with a second APU and a PC Engine
           python chip8bit.py --cli tests/genesis-style.mid --extensions dual,pce --stereo
           cp "tests/genesis-style [nes+dual+pce].wav" demo/demo-2x-nes-pc-engine.wav
+          # the NES switched off: a PC Engine on its own is six voices, not a
+          # NES with six extras, and its file is named [pce] not [nes+pce]
+          python chip8bit.py --cli tests/genesis-style.mid --no-nes --extensions pce --stereo
+          cp "tests/genesis-style [pce].wav" demo/demo-pce-only.wav
           ls -la demo
 
       # Artifacts keep the folder layout of what they upload, and the release job
@@ -65,7 +69,7 @@ jobs:
         run: |
           mkdir -p release_assets
           cp demo/demo-all-chips.wav demo/demo-bare-nes.wav demo/demo-fast-tune.wav \
-             demo/demo-2x-nes-pc-engine.wav release_assets/
+             demo/demo-2x-nes-pc-engine.wav demo/demo-pce-only.wav release_assets/
           cp window-tracker.png window-win95.png window-amiga.png release_assets/
           ls -la release_assets
 
@@ -242,8 +246,10 @@ jobs:
             are kept and the rest are reported as thinned. Nothing is crammed in as
             an arpeggio.
 
-            `demo-*.wav` are the built-in test tune on the bare NES and on the console
-            with every extension chip enabled. `window-tracker.png`,
+            `demo-*.wav` are the built-in test tune on the bare NES, on the console
+            with every extension chip enabled, on two NES APUs plus a PC Engine, and
+            on a PC Engine **with the NES switched off** (`--no-nes --extensions pce`):
+            six PC Engine voices and nothing else. `window-tracker.png`,
             `window-win95.png` and `window-amiga.png` are real screenshots of the
             three looks. The default window is a FastTracker II desk: blue frame,
             lavender buttons, waveform scopes for every voice, and the pattern page
@@ -266,7 +272,8 @@ jobs:
           set -e
           for name in chip8bit.exe chip8bit-cli.exe window-tracker.png \
                       window-win95.png window-amiga.png \
-                      demo-all-chips.wav demo-bare-nes.wav demo-fast-tune.wav; do
+                      demo-all-chips.wav demo-bare-nes.wav demo-fast-tune.wav \
+                      demo-2x-nes-pc-engine.wav demo-pce-only.wav; do
             size=$(gh release view chip8bit-latest --json assets \
               --jq ".assets[] | select(.name==\"$name\") | .size")
             if [ -z "$size" ]; then
