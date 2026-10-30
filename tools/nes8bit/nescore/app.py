@@ -30,6 +30,7 @@ FPS = 60
 
 LOOK_LABELS = {"tracker": "FT2 LOOK", "win95": "WIN95 LOOK",
                "amiga": "AMIGA LOOK"}
+RATES = (22050, 32000, 44100, 48000, 96000)   # what the RATE spinner walks
 GROUP_SIZE = 4             # channels per row-number group, as in FastTracker II
 PATTERN_ROWS = 64          # one tracker pattern
 PATTERN_SPEED = 6          # ticks per row: 2.5/BPM * 6 seconds
@@ -213,6 +214,7 @@ class App:
         # the song browser (only DS archives open one)
         self.song_window: Optional[dict] = None
         self.song_rows: List[tuple] = []
+        self.songs_buttons: List[tuple] = []      # (queue index, rect) per row
         self.song_list_view = pygame.Rect(0, 0, 0, 0)
         self._song_click = (-1, 0.0)
         self._song_typed = ""
@@ -892,6 +894,43 @@ class App:
         self.settings.bits = 8 if self.settings.bits > 8 else 16
         self._save_settings()
 
+    def set_bits(self, bits: int) -> None:
+        if self.settings.bits != bits:
+            self.settings.bits = bits
+            self._save_settings()
+
+    def step_rate(self, step: int) -> None:
+        """Walk the sample rates the mix can be rendered at."""
+        rates = list(RATES)
+        current = self.settings.rate
+        if current in rates:
+            position = rates.index(current)
+        else:
+            position = min(range(len(rates)),
+                           key=lambda i: abs(rates[i] - current))
+        position = max(0, min(len(rates) - 1, position + step))
+        if rates[position] != current:
+            self.settings.rate = rates[position]
+            self._save_settings()
+
+    def step_chips(self, step: int) -> None:
+        """One extension chip on or off, in the CHIPS panel's own order."""
+        names = list(chips.EXTENSION_CHANNELS)
+        if not names:
+            return
+        if step > 0:
+            for name in names:
+                if name not in self.settings.extensions:
+                    self.settings.extensions.append(name)
+                    self._save_settings()
+                    return
+        else:
+            for name in reversed(names):
+                if name in self.settings.extensions:
+                    self.settings.extensions.remove(name)
+                    self._save_settings()
+                    return
+
     def toggle_vgm(self) -> None:
         self.settings.export_vgm = not self.settings.export_vgm
         self._save_settings()
@@ -940,6 +979,8 @@ class App:
 
     def draw(self) -> None:
         self.hits = []
+        self.songs_buttons = []
+        self.song_rows = []
         self.mouse = pygame.mouse.get_pos()
         t = self.theme
         self.screen.fill(t.desktop)
@@ -999,25 +1040,37 @@ class App:
         theme.panel(self.screen, left, t)
         field_font = self.fonts["small"]
 
-        def value_box(x, y, w, label, value, action=None):
+        def value_box(x, y, w, label, value, up_action=None, down_action=None):
+            """A framed number with a pair of arrows, like FT2's tempo boxes.
+
+            The arrows are real: a box that shows a number you cannot change is
+            a box that lies about being a control.
+            """
             self._text(x, y - 13, label, "tiny", t.dim)
             box = pygame.Rect(x, y, w - 28, 26)
             theme.numeric(self.screen, box, t, value, field_font)
             up = pygame.Rect(box.right + 3, y, 23, 12)
             down = pygame.Rect(box.right + 3, y + 14, 23, 12)
-            for arrow_rect, direction in ((up, "up"), (down, "down")):
+            for arrow_rect, direction, action in ((up, "up", up_action),
+                                                  (down, "down", down_action)):
                 theme.arrow(self.screen, arrow_rect, t, direction)
                 if action:
                     self.hits.append((arrow_rect.copy(), action))
             return box
 
-        value_box(left.x + 8, left.y + 20, 116, "VOICES", "%02d" % self.voice_count())
-        value_box(left.x + 134, left.y + 20, 108, "CHIPS", "%02d" % (
-            1 + len(self.settings.extensions)))
+        more_chips = lambda: self.step_chips(1)          # noqa: E731
+        fewer_chips = lambda: self.step_chips(-1)        # noqa: E731
+        value_box(left.x + 8, left.y + 20, 116, "VOICES",
+                  "%02d" % self.voice_count(), more_chips, fewer_chips)
+        value_box(left.x + 134, left.y + 20, 108, "CHIPS",
+                  "%02d" % (1 + len(self.settings.extensions)),
+                  more_chips, fewer_chips)
         value_box(left.x + 8, left.y + 62, 116, "BITS",
-                  "%02d" % self.settings.bits, self.toggle_bits)
+                  "%02d" % self.settings.bits,
+                  lambda: self.set_bits(16), lambda: self.set_bits(8))
         value_box(left.x + 134, left.y + 62, 108, "RATE",
-                  "%dk" % (self.settings.rate // 1000))
+                  "%dk" % (self.settings.rate // 1000),
+                  lambda: self.step_rate(1), lambda: self.step_rate(-1))
 
         # --- middle: the logo block
         logo_x = left.right + 6
@@ -1575,6 +1628,12 @@ class App:
         inner = theme.panel(self.screen, queue_box, t,
                             "FILES TO CONVERT  %d" % len(self.items),
                             self.fonts["tiny"])
+        # Clicking the empty panel adds files — but only while it *is* empty, so
+        # a click on a queued row can never fall through to the file dialog.
+        # Registered first, so every button and row on top wins the click: the
+        # dispatch walks the hit list backwards.
+        if not self.items:
+            self.hits.append((queue_box.copy(), self.pick_files))
         self._tiny_buttons(queue_box, (("ADD", self.pick_files, 46),
                                        ("CLEAR", self.clear_queue, 62)))
         footer_h = 22
@@ -1624,8 +1683,7 @@ class App:
                                            row.y + 3, songs_width, row_h - 8)
                 theme.button(self.screen, songs_button, t, "SONGS",
                              self.fonts["tiny"])
-                self.hits.append((songs_button.copy(),
-                                  (lambda i=index: self.open_songs(i))))
+                self.songs_buttons.append((index, songs_button.copy()))
                 if item.catalogue_note:
                     tag, colour = "no songs", t.bad
                 elif item.catalogue is None:
@@ -1640,6 +1698,8 @@ class App:
                                  (songs_button.x - tag_surface.get_width() - 6,
                                   row.y + 4))
                 self.hits.append((row.copy(), (lambda i=index: self.open_songs(i))))
+                self.hits.append((songs_button.copy(),
+                                  (lambda i=index: self.open_songs(i))))
             else:
                 if failed:
                     tag, colour = "FAIL", t.bad
@@ -1691,7 +1751,6 @@ class App:
                             footer.width - label.get_width() - 12),
                        "tiny", t.text)
             self.hits.append((footer.copy(), self.open_output_dir))
-        self.hits.append((queue_box, self.pick_files))
 
         results_box = pygame.Rect(rect.x, queue_box.bottom + 6, rect.width,
                                   rect.bottom - queue_box.bottom - 6)
@@ -1966,7 +2025,7 @@ def _visible_columns(app) -> int:
     return getattr(app, "pattern_columns", 1)
 
 
-def _selftest_ds_rom(app, check) -> None:
+def _selftest_ds_rom(app, check, click) -> None:
     """Queue and convert a DS ROM in the window.
 
     The ROM is built by tests/make_test_rom.py, which a packaged build does not
@@ -2002,14 +2061,27 @@ def _selftest_ds_rom(app, check) -> None:
         check("the ROM's songs are listed",
               bool(app.items[0].catalogue),
               app.items[0].catalogue_note or "no catalogue")
-        app.open_songs(0)
+        # click the row's SONGS button, the way a person does
+        app.draw()
+        check("the queued ROM shows a SONGS button", bool(app.songs_buttons),
+              str(app.songs_buttons))
+        if app.songs_buttons:
+            click(app.songs_buttons[0][1])
         app.draw()
         check("the song browser opens over the window",
               bool(app.song_window) and len(app.song_rows) >= 2,
               str(len(app.song_rows)))
-        app.move_song(1)
+        if app.song_window and len(app.song_rows) >= 2:
+            click(app.song_rows[1][1])
+            app.draw()
+        check("clicking a song in the list highlights it",
+              bool(app.song_window) and app.song_window["selected"] == 1,
+              str(app.song_window["selected"] if app.song_window else "closed"))
+        use_buttons = sorted([rect for rect, _action in app.hits
+                              if rect.height == 28], key=lambda rect: rect.x)
+        if use_buttons:
+            click(use_buttons[1])           # ADD ALL SONGS, USE THIS SONG, CANCEL
         app.draw()
-        app.use_song()
         check("a song can be picked for one file",
               app.items[0].sequence != "" and
               app.items[0].sequence != app.items[0].catalogue["chosen"],
@@ -2072,13 +2144,31 @@ def selftest(screenshot: Optional[str] = None) -> int:
     app.draw()
 
     def click(rect: pygame.Rect) -> bool:
+        """Press a control the way the window does: a real mouse event.
+
+        Going through handle_event means the check also proves the button is
+        reachable — a control drawn *under* a bigger one answers nothing.
+        """
         app.mouse = rect.center
         app.draw()
-        for hit_rect, action in reversed(app.hits):
-            if hit_rect.collidepoint(rect.center):
-                action()
-                return True
-        return False
+        reachable = any(hit_rect.collidepoint(rect.center)
+                        for hit_rect, _action in app.hits)
+        app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                            pos=rect.center))
+        return reachable
+
+    def unreachable_hits() -> List[str]:
+        """Controls whose middle is covered by a bigger control drawn later."""
+        app.draw()
+        hidden: List[str] = []
+        for rect, action in app.hits:
+            for other_rect, other_action in reversed(app.hits):
+                if not other_rect.collidepoint(rect.center):
+                    continue
+                if other_action is not action:
+                    hidden.append("%s under %s" % (action, other_action))
+                break
+        return hidden
 
     try:
         check("window opens", app.screen.get_size() == (WIDTH, HEIGHT))
@@ -2226,8 +2316,78 @@ def selftest(screenshot: Optional[str] = None) -> int:
         check("ALL turns them back on", len(app.settings.extensions) == 6,
               str(len(app.settings.extensions)))
 
+        # --- the header spinners must do what their numbers say
+        app.draw()
+        arrows = [rect for rect, _action in app.hits
+                  if rect.width == 23 and rect.height == 12]
+        # two arrows per box, stacked in one column: group by x, keep the higher
+        # one as "up", then order the boxes left to right and top to bottom
+        columns = {}
+        for rect in arrows:
+            columns.setdefault(rect.x, []).append(rect)
+        boxes = []
+        for x in sorted(columns):
+            stacked = sorted(columns[x], key=lambda rect: rect.y)
+            for start in range(0, len(stacked) - 1, 2):
+                boxes.append((stacked[start], stacked[start + 1]))
+        boxes.sort(key=lambda pair: (pair[0].y, pair[0].x))
+        check("the header has eight live spinner arrows",
+              len(arrows) == 8 and len(boxes) == 4,
+              "%d arrows in %d boxes" % (len(arrows), len(boxes)))
+        if len(arrows) == 8 and len(boxes) == 4:
+            app.no_chips()
+            voices_up, voices_down = sorted(boxes[0], key=lambda r: r.y)
+            chips_up, chips_down = sorted(boxes[1], key=lambda r: r.y)
+            bits_up, bits_down = sorted(boxes[2], key=lambda r: r.y)
+            rate_up, rate_down = sorted(boxes[3], key=lambda r: r.y)
+            before = len(app.settings.extensions)
+            click(voices_up)
+            check("VOICES up adds a chip, and the number follows",
+                  len(app.settings.extensions) == before + 1 and
+                  app.voice_count() > 4,
+                  "%s chips, %s voices" % (len(app.settings.extensions),
+                                           app.voice_count()))
+            click(voices_down)
+            check("VOICES down takes it away again",
+                  len(app.settings.extensions) == before,
+                  str(app.settings.extensions))
+            click(chips_up)
+            check("CHIPS up is the same control",
+                  len(app.settings.extensions) == before + 1,
+                  str(app.settings.extensions))
+            click(chips_down)
+            click(bits_down)
+            check("BITS down chooses 8 bit", app.settings.bits == 8,
+                  str(app.settings.bits))
+            click(bits_up)
+            check("BITS up chooses 16 bit", app.settings.bits == 16,
+                  str(app.settings.bits))
+            rate_before = app.settings.rate
+            click(rate_up)
+            check("RATE up picks the next sample rate",
+                  app.settings.rate == 48000, str(app.settings.rate))
+            click(rate_down)
+            check("RATE down comes back", app.settings.rate == rate_before,
+                  str(app.settings.rate))
+            app.all_chips()
+            app.settings.rate = 44100
+
         # --- a Nintendo DS ROM: queue it, convert it, and see the extras named
-        _selftest_ds_rom(app, check)
+        _selftest_ds_rom(app, check, click)
+
+        # A control drawn under a bigger one answers nothing, so every
+        # button and row has to win the click at its own middle — in
+        # each look, because the three paints lay out differently.
+        for key, theme_obj in theme.THEMES.items():
+            app.theme = theme_obj
+            app.look = theme_obj.key
+            app._build_fonts()
+            hidden = unreachable_hits()
+            check("every control answers a click (%s look)" % key,
+                  not hidden, "; ".join(hidden[:3]))
+        app.theme = theme.THEMES["tracker"]
+        app.look = "tracker"
+        app._build_fonts()
 
         if screenshot:
             base, extension = os.path.splitext(screenshot)

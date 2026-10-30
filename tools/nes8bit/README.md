@@ -40,7 +40,10 @@ with the panels **cut into** it, so nothing floats on a coloured background.
    rather than failing halfway through a batch. *DEMO* queues a tune to play with.
 2. **Pick chips** — the `CHIPS` box lists what each extension chip adds; `ALL` and
    `NONE` in its title line switch the whole set. `VOICES` and `CHIPS` in the header
-   follow along (4 → 22 voices). The choice is remembered between runs.
+   follow along (4 → 22 voices) and their arrows add or drop one chip, while `BITS`
+   picks 8 or 16 and `RATE` walks 22k / 32k / 44k / 48k / 96k. Every spinner in the
+   header is a control that does what its number says. The choice is remembered
+   between runs.
 3. **Convert** — press *CONVERT*. The button counts what is waiting (`CONVERT 3`)
    and the list keeps you posted, one row per file:
 
