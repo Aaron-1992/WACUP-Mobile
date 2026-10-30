@@ -15,7 +15,7 @@ import os
 import sys
 import time
 
-from . import analyze, chips, importers
+from . import analyze, chips, convert, importers
 from .arrange import Options, arrange
 from .render import RenderOptions, render, write_stems, write_wav
 from .vgmout import write_vgm
@@ -56,8 +56,10 @@ def _tag(extensions) -> str:
 
 
 def _output_path(source: str, out_argument: str, extensions, suffix: str,
-                 multiple: bool) -> str:
+                 multiple: bool, label: str = "") -> str:
     stem = os.path.splitext(os.path.basename(source))[0]
+    if label:
+        stem = "%s %s" % (stem, convert._plain_name(label))
     named = "%s [%s]%s" % (stem, _tag(extensions), suffix)
 
     if not out_argument:
@@ -115,7 +117,8 @@ def _list_songs(inputs) -> int:
                                   "" if len(songs) == 1 else "s"))
         for index, bank, name in songs:
             print("  %3d  bank %2d  %s" % (index, bank, name))
-        print("  (pick one with --sequence NAME or --sequence NUMBER)")
+        print("  (pick one with --sequence NAME, or --sequence with the number "
+              "above)")
     if not found:
         print("no DS ROM, SDAT or SSEQ found")
         return 1
@@ -174,14 +177,20 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
     else:
         pcm, _stems, duration = render(notes, channels, render_options, grouped)
 
-    target = _output_path(source, args.output, extensions, ".wav", multiple)
+    # a ROM holds many songs: the one that was converted belongs in the name
+    song_label = getattr(song, "ds_song", "") if getattr(
+        song, "ds_song_count", 0) > 1 else ""
+    target = _output_path(source, args.output, extensions, ".wav", multiple,
+                          song_label)
     write_wav(target, pcm, render_options)
 
     # A DS ROM gives up its own MIDI and SoundFont as well, so the same music can
     # be played (or edited) outside this tool. They sit next to the .wav.
+    stem_of_source = os.path.splitext(os.path.basename(target))[0]
+    if " [" in stem_of_source:                 # drop the chip tag from the name
+        stem_of_source = stem_of_source.rsplit(" [", 1)[0]
     for extra in importers.extract_assets(
-            source, os.path.dirname(target) or ".",
-            os.path.splitext(os.path.basename(source))[0]):
+            source, os.path.dirname(target) or ".", stem_of_source):
         print("  + %s" % extra)
 
     if args.export_vgm:

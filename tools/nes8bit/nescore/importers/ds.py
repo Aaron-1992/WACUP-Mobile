@@ -43,6 +43,10 @@ def read_with(path: str, settings=None) -> Song:
         broken.add_warning(str(error))
         return broken
     _LAST = (path, archive, entry, bank)
+    # what the window shows in "WHAT I FOUND", and what it names the .wav after
+    song.ds_song = entry.name
+    song.ds_song_index = entry.index + 1
+    song.ds_song_count = len(archive.sequences)
     return song
 
 
@@ -62,13 +66,30 @@ def assets(path: str, directory: str, stem: str) -> List[str]:
         return []
 
 
-def songs(path: str):
-    """Every song in a DS file as (index, bank, name), for listing and picking."""
+def catalogue(path: str):
+    """Everything the song browser lists, without converting anything.
+
+    Returns {name, songs: [(index, bank, name)], banks, waves, chosen}: the songs
+    with the bank each one asks for, how many banks and wave archives the archive
+    holds, and which song the reader would pick on its own.
+    """
     try:
-        _song, archive, entry, _bank = nds.load(path)
+        archive, _title = nds.open_archive(path)
     except nds.NdsError as error:
         raise ValueError(str(error))
-    return [(item.index, item.bank, item.name) for item in archive.sequences]
+    chosen = archive.best_sequence()
+    return dict(
+        name=archive.name,
+        songs=[(item.index, item.bank, item.name) for item in archive.sequences],
+        banks=len(archive.banks),
+        waves=len(archive.waves),
+        chosen=chosen.name,
+    )
+
+
+def songs(path: str):
+    """Every song in a DS file as (index, bank, name), for listing and picking."""
+    return catalogue(path)["songs"]
 
 
 def describe(path: str) -> str:

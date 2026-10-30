@@ -128,6 +128,18 @@ def module_of(importer):
     return sys.modules.get(getattr(importer, "__module__", ""))
 
 
+def catalogue(path: str):
+    """List the songs a file holds, when its format has more than one.
+
+    Only DS archives can answer; everything else returns None, which is the
+    answer the song browser needs ("this file has no songs to choose").
+    """
+    _load_builtin()
+    module = module_of(find_for(path))
+    reader = getattr(module, "catalogue", None)
+    return reader(path) if reader else None
+
+
 def read_source(path: str, settings=None):
     """Read a file with whatever the format needs from the settings.
 

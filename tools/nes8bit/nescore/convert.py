@@ -90,17 +90,40 @@ class Result:
     render_seconds: float = 0.0
     stems: Dict[str, list] = field(default_factory=dict)   # per-channel audio, for checks
     assets: List[str] = field(default_factory=list)        # MIDI/SoundFont written next to it
+    song: str = ""                                         # the song taken from an archive
+    song_index: int = 0                                    # 1-based, for "12 of 37"
+    song_count: int = 0
 
 
-def output_name(source: str, settings: Settings) -> str:
+def output_name(source: str, settings: Settings, label: str = "") -> str:
+    """The name of the .wav: the file, the song inside it (if it has names for
+    them) and the chips that were on."""
     stem = os.path.splitext(os.path.basename(source))[0]
+    if label:
+        stem = "%s %s" % (stem, _plain_name(label))
     return "%s [%s].wav" % (stem, settings.tag())
+
+
+def _plain_name(text: str) -> str:
+    """Keep a song name usable as a file name (no slashes, colons, brackets...).
+
+    A song name comes out of the archive, so it may hold anything at all: dots
+    that would read as "go up a folder", NULs, or a name that is only spaces.
+    """
+    cleaned = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in text)
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", "_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    cleaned = cleaned.strip(" ._-")
+    return " ".join(cleaned.split()) or "song"
 
 
 def convert_file(source: str, settings: Settings,
                  output_path: Optional[str] = None,
                  keep_in_memory: bool = False,
-                 progress=None) -> Result:
+                 progress=None,
+                 output_dir: Optional[str] = None) -> Result:
     """Import, arrange, render, and write the result. Never raises for bad input.
 
     ``progress`` is called as progress(stage, fraction) so a window can show what
@@ -119,11 +142,6 @@ def convert_file(source: str, settings: Settings,
     result = Result(name=os.path.basename(source))
     report("Reading", 0.05)
 
-    target = output_path or os.path.join(os.path.dirname(os.path.abspath(source)),
-                                         output_name(source, settings))
-    directory = os.path.dirname(target)
-    stem = os.path.splitext(os.path.basename(source))[0]
-
     try:
         song = importers.read_source(source, settings)
     except Exception as error:
@@ -132,6 +150,20 @@ def convert_file(source: str, settings: Settings,
         return result
 
     result.warnings = list(song.warnings)
+    result.song = getattr(song, "ds_song", "")
+    result.song_index = int(getattr(song, "ds_song_index", 0) or 0)
+    result.song_count = int(getattr(song, "ds_song_count", 0) or 0)
+
+    # One ROM can hold a hundred songs, so the song belongs in the file name:
+    # converting two of them must not leave one .wav on top of the other.
+    label = result.song if result.song_count > 1 else ""
+    target = output_path or os.path.join(
+        output_dir or os.path.dirname(os.path.abspath(source)),
+        output_name(source, settings, label))
+    directory = os.path.dirname(target)
+    stem = os.path.splitext(os.path.basename(source))[0]
+    if label:
+        stem = "%s %s" % (stem, _plain_name(label))
 
     # A source that carries its own instruments (a DS ROM) also hands over the
     # MIDI and SoundFont it was described by, so the same music can be played

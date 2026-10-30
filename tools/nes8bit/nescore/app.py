@@ -17,11 +17,12 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 import pygame
 
-from . import chips, convert, dialogs, demo, gm, theme
+from . import chips, convert, dialogs, demo, gm, importers, theme
 
 WIDTH, HEIGHT = 1200, 830
 MIN_WIDTH, MIN_HEIGHT = 1000, 740
@@ -105,10 +106,14 @@ def _fit(font, text: str, width: int) -> str:
     return (text + "…") if text else ""
 
 
+DS_EXTENSIONS = (".nds", ".sdat", ".sseq")
+
+
 class QueueItem:
     """One file waiting to be converted, plus what happened to it."""
 
-    def __init__(self, path: str, name: str, size: int = 0):
+    def __init__(self, path: str, name: str, size: int = 0,
+                 sequence: str = "", bank: str = ""):
         self.path = path
         self.name = name
         self.size = size
@@ -116,6 +121,42 @@ class QueueItem:
         self.fraction = 0.0
         self.stage = ""
         self.error = ""
+        # a DS ROM holds many songs: which one this row converts
+        self.sequence = sequence
+        self.bank = bank
+        self.catalogue: Optional[dict] = None     # songs, banks, waves, name
+        self.catalogue_note = ""                  # why it could not be read
+        self.catalogue_reading = False
+
+    def is_archive(self) -> bool:
+        return os.path.splitext(self.path)[1].lower() in DS_EXTENSIONS
+
+    def song(self) -> str:
+        """The song this row converts: what was picked, or the archive's own."""
+        if self.sequence:
+            return self.sequence
+        if self.catalogue:
+            return self.catalogue.get("chosen", "")
+        return ""
+
+    def song_count(self) -> int:
+        return len(self.catalogue["songs"]) if self.catalogue else 0
+
+    def song_number(self) -> int:
+        """1-based position of the chosen song, for "12 of 37"."""
+        if not self.catalogue:
+            return 0
+        wanted = self.song().lower()
+        for position, (_index, _bank, name) in enumerate(self.catalogue["songs"], 1):
+            if name.lower() == wanted:
+                return position
+        return 1 if self.catalogue["songs"] else 0
+
+    def settings_for(self, settings):
+        """This row's conversion settings: a copy with its own song and bank."""
+        if not (self.sequence or self.bank):
+            return settings
+        return replace(settings, sequence=self.sequence, bank=self.bank)
 
 
 READABLE = (".mid", ".midi", ".rmi", ".kar", ".vgm", ".vgz", ".gym",
@@ -169,6 +210,12 @@ class App:
         self.mouse_in_pattern = False
         self.mouse_in_queue = False
         self.mouse_in_results = False
+        # the song browser (only DS archives open one)
+        self.song_window: Optional[dict] = None
+        self.song_rows: List[tuple] = []
+        self.song_list_view = pygame.Rect(0, 0, 0, 0)
+        self._song_click = (-1, 0.0)
+        self._catalogues_reading: set = set()
         self.queue_view = pygame.Rect(0, 0, 0, 0)
         self.results_view = pygame.Rect(0, 0, 0, 0)
 
@@ -237,12 +284,13 @@ class App:
 
     # ------------------------------------------------------------------- files
 
-    def add_path(self, path: str) -> None:
+    def add_path(self, path: str, sequence: str = "", bank: str = "") -> None:
         if not os.path.isfile(path):
             self.status = "Not a file: %s" % path
             self.status_error = True
             return
-        if any(item.path == path for item in self.items):
+        if any(item.path == path and item.sequence == sequence
+               for item in self.items):
             self.status = "%s is already in the list" % os.path.basename(path)
             self.status_error = False
             return
@@ -255,9 +303,194 @@ class App:
             size = os.path.getsize(path)
         except OSError:
             size = 0
-        self.items.append(QueueItem(path, os.path.basename(path), size))
+        item = QueueItem(path, os.path.basename(path), size,
+                         sequence=sequence, bank=bank)
+        self.items.append(item)
         self.status = "%d file%s queued — press CONVERT" % (
             len(self.items), "" if len(self.items) == 1 else "s")
+        self.status_error = False
+        if item.is_archive():
+            self.read_catalogue(item)
+
+    # ------------------------------------------------------------ song browser
+
+    def read_catalogue(self, item: QueueItem) -> None:
+        """List the songs inside a DS file, off the drawing thread."""
+        if item.catalogue is not None or item.catalogue_reading:
+            return
+        item.catalogue_reading = True
+        item.catalogue_note = ""
+        if item.path not in self._catalogues_reading:
+            self._catalogues_reading.add(item.path)
+            threading.Thread(target=self._read_catalogue, args=(item.path,),
+                             daemon=True).start()
+
+    def _read_catalogue(self, path: str) -> None:
+        catalogue = None
+        note = ""
+        try:
+            catalogue = importers.catalogue(path)
+            if catalogue is None:
+                note = "this file holds no songs to list"
+        except Exception as error:                 # a bad file must not crash
+            note = str(error)
+        self.messages.put(("catalogue", path, catalogue, note))
+
+    def _catalogue_arrived(self, path: str, catalogue, note: str) -> None:
+        self._catalogues_reading.discard(path)
+        for item in self.items:
+            if item.path != path:
+                continue
+            item.catalogue_reading = False
+            item.catalogue = catalogue
+            item.catalogue_note = note
+        window = self.song_window
+        if window and window["item"].path == path:
+            self._fill_song_window(window["item"])
+
+    def open_songs(self, index: int) -> None:
+        """Open the song browser for one queued file."""
+        if not (0 <= index < len(self.items)):
+            return
+        item = self.items[index]
+        if not item.is_archive():
+            self.status = "%s is not a DS archive — it has no songs to choose" % item.name
+            self.status_error = True
+            return
+        self.song_window = {"item": item, "selected": 0, "scroll": 0,
+                            "bank": item.bank, "row_h": 22}
+        self._fill_song_window(item)
+        self.read_catalogue(item)
+        if item.catalogue:
+            self.status = "%d song%s in %s — Enter uses one, ESC closes" % (
+                item.song_count(), "" if item.song_count() == 1 else "s", item.name)
+        else:
+            self.status = "Reading the songs in %s…" % item.name
+        self.status_error = False
+
+    def _fill_song_window(self, item: QueueItem) -> None:
+        window = self.song_window
+        if not window or window["item"] is not item:
+            return
+        window["selected"] = 0
+        window["scroll"] = 0
+        if item.catalogue:
+            wanted = item.song()
+            for position, (_index, _bank, name) in enumerate(item.catalogue["songs"]):
+                if wanted and name.lower() == wanted.lower():
+                    window["selected"] = position
+                    break
+            window["bank"] = item.bank or ""
+
+    def close_songs(self) -> None:
+        if self.song_window:
+            self.song_window = None
+            self.status = "Song list closed — the file still converts as it is"
+            self.status_error = False
+
+    def _window_songs(self) -> List[tuple]:
+        window = self.song_window
+        if not window or not window["item"].catalogue:
+            return []
+        return window["item"].catalogue["songs"]
+
+    def move_song(self, step: int) -> None:
+        songs = self._window_songs()
+        if not songs or not self.song_window:
+            return
+        window = self.song_window
+        window["selected"] = max(0, min(len(songs) - 1,
+                                        window["selected"] + step))
+        self._scroll_song_into_view()
+
+    def _scroll_song_into_view(self) -> None:
+        window = self.song_window
+        if not window or not self.song_list_view.height:
+            return
+        visible = max(1, (self.song_list_view.height - 4) // window["row_h"])
+        selected = window["selected"]
+        if selected < window["scroll"]:
+            window["scroll"] = selected
+        elif selected >= window["scroll"] + visible:
+            window["scroll"] = selected - visible + 1
+        window["scroll"] = max(0, min(window["scroll"],
+                                      max(0, len(self._window_songs()) - visible)))
+
+    def pick_song_row(self, position: int) -> None:
+        songs = self._window_songs()
+        if not songs or not self.song_window:
+            return
+        position = max(0, min(len(songs) - 1, position))
+        now = time.time()
+        last, when = self._song_click
+        self._song_click = (position, now)
+        self.song_window["selected"] = position
+        if last == position and now - when < 0.45:
+            self.use_song()            # a double click takes the song
+
+    def change_bank(self, step: int) -> None:
+        """Step the bank number in the browser (empty = the song's own bank)."""
+        window = self.song_window
+        if not window:
+            return
+        item = window["item"]
+        banks = (item.catalogue or {}).get("banks", 0) or 1
+        current = window["bank"]
+        if current == "":
+            songs = self._window_songs()
+            selected = window["selected"]
+            own = songs[selected][1] if songs else 0
+            value = own + step
+        else:
+            value = int(current) + step
+        value = max(0, min(max(0, banks - 1), value))
+        window["bank"] = str(value)
+
+    def use_song(self) -> None:
+        """Take the highlighted song for this queue row, and close the browser."""
+        window = self.song_window
+        songs = self._window_songs()
+        if not window or not songs:
+            return
+        item = window["item"]
+        _index, own_bank, name = songs[window["selected"]]
+        bank = window["bank"]
+        valid_banks = (item.catalogue or {}).get("banks", 0)
+        if bank != "" and valid_banks and int(bank) >= valid_banks:
+            bank = ""
+        if bank == str(own_bank):
+            bank = ""                      # the song's own bank: say nothing
+        item.sequence = name
+        item.bank = bank
+        self.song_window = None
+        self.status = "%s → %s%s — press CONVERT" % (
+            item.name, name, "" if not bank else " (bank %s)" % bank)
+        self.status_error = False
+
+    def add_all_songs(self) -> None:
+        """Queue every song in the archive as its own row."""
+        window = self.song_window
+        if not window or not window["item"].catalogue:
+            return
+        item = window["item"]
+        songs = item.catalogue["songs"]
+        existing = {(entry.path, entry.sequence) for entry in self.items}
+        added = 0
+        for _index, _bank, name in songs[:200]:
+            if (item.path, name) in existing:
+                continue
+            self.items.append(QueueItem(item.path, item.name, item.size,
+                                        sequence=name))
+            existing.add((item.path, name))
+            added += 1
+        self.song_window = None
+        if not item.sequence:              # the row that stood for "all of it"
+            self.items = [entry for entry in self.items if entry is not item]
+        if added:
+            self.status = "Queued %d song%s from %s — press CONVERT" % (
+                added, "" if added == 1 else "s", item.name)
+        else:
+            self.status = "Every song in %s is already in the list" % item.name
         self.status_error = False
 
     def add_demo(self) -> None:
@@ -315,7 +548,7 @@ class App:
         self.status_error = False
         self.status = "Converting %d file%s…" % (len(pending),
                                                  "" if len(pending) == 1 else "s")
-        files = [(item.path, item.name) for item in pending]
+        files = list(pending)
         threading.Thread(target=self._work, args=(files, self.settings),
                          daemon=True).start()
 
@@ -338,7 +571,8 @@ class App:
         except OSError:
             pass
         try:
-            for index, (path, name) in enumerate(files):
+            for index, item in enumerate(files):
+                path, name = item.path, item.name
                 self.messages.put(("begin", index))
 
                 def progress(stage, fraction, index=index):
@@ -346,10 +580,8 @@ class App:
                                        max(0.0, min(1.0, fraction))))
 
                 try:
-                    target = os.path.join(output_dir,
-                                          convert.output_name(path, settings))
-                    result = convert.convert_file(path, settings,
-                                                  output_path=target,
+                    result = convert.convert_file(path, item.settings_for(settings),
+                                                  output_dir=output_dir,
                                                   progress=progress)
                 except Exception as error:      # one bad file must not stop the rest
                     result = convert.Result(ok=False, name=name,
@@ -365,6 +597,10 @@ class App:
                 message = self.messages.get_nowait()
             except queue.Empty:
                 return
+            if message[0] == "catalogue":
+                _tag, path, catalogue, note = message
+                self._catalogue_arrived(path, catalogue, note)
+                continue
             if message[0] == "begin":
                 _, index = message
                 if 0 <= index < len(self.batch):
@@ -515,6 +751,9 @@ class App:
             for path in (getattr(event, "files", None) or [event.file]):
                 self.add_path(path)
         elif event.type == pygame.MOUSEWHEEL:
+            if self.song_window:
+                self.move_song(-event.y * 3)
+                return
             rows = max(1, self.pattern_height // 10)
             if self.mouse_in_pattern:
                 if pygame.key.get_mods() & pygame.KMOD_SHIFT:
@@ -526,6 +765,9 @@ class App:
             elif self.mouse_in_results:
                 self.scroll_results = max(0, self.scroll_results - event.y)
         elif event.type == pygame.KEYDOWN:
+            if self.song_window:
+                self._song_window_key(event)
+                return
             page = max(1, self.pattern_height // self._row_height())
             if event.key == pygame.K_UP:
                 self.pattern_row = max(0, self.pattern_row - 1)
@@ -556,6 +798,33 @@ class App:
                 if rect.collidepoint(event.pos):
                     action()
                     break
+
+    def _song_window_key(self, event) -> None:
+        """Keys while the song browser is open: pick, use, or leave."""
+        row_h = self.song_window["row_h"] if self.song_window else 22
+        visible = max(1, (self.song_list_view.height - 4) // row_h) \
+            if self.song_list_view.height else 8
+        if event.key == pygame.K_ESCAPE:
+            self.close_songs()
+        elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+            self.use_song()
+        elif event.key == pygame.K_UP:
+            self.move_song(-1)
+        elif event.key == pygame.K_DOWN:
+            self.move_song(1)
+        elif event.key == pygame.K_PAGEUP:
+            self.move_song(-visible)
+        elif event.key == pygame.K_PAGEDOWN:
+            self.move_song(visible)
+        elif event.key == pygame.K_HOME:
+            self.move_song(-len(self._window_songs()))
+        elif event.key == pygame.K_END:
+            self.move_song(len(self._window_songs()))
+        elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_RIGHT):
+            self.change_bank(1)
+        elif event.key in (pygame.K_MINUS, pygame.K_LEFT):
+            self.change_bank(-1)
+        self._scroll_song_into_view()
 
     # ----------------------------------------------------------------- switches
 
@@ -647,6 +916,11 @@ class App:
         self._draw_pattern(pattern)
         self._draw_side(side)
         self._draw_status(status)
+        if self.song_window:
+            # The browser is modal: nothing behind it can be clicked while it is
+            # open, so a stray click cannot start a conversion or move the queue.
+            self.hits = []
+            self._draw_song_window(outer)
 
     def _text(self, x, y, text, font="body", color=None):
         t = self.theme
@@ -764,13 +1038,17 @@ class App:
         if not lines:
             lines = ["Converted %s" % os.path.basename(result.wav_path)]
         out = []
+        if result.song and result.song_count > 1:
+            out.append("%s · song %d of %d · %s" % (
+                result.name or "that file", result.song_index,
+                result.song_count, result.song))
         for line in lines:
             if line.startswith("Instruments: "):
                 out.append("Instr: " + line[len("Instruments: "):])
             elif line.startswith("Found "):
                 out.append(line)
-        if not out:
-            out = lines[:1]
+        if len(out) < 2:
+            out = out + lines[:1]
         if result.ok:
             kept = "%d notes kept" % result.kept
             if getattr(result, "left_out", 0):
@@ -1281,7 +1559,7 @@ class App:
             self._text(view.x + 6, view.y + 6, "drop music here, or ADD",
                        "small", t.pattern_empty)
             self._text(view.x + 6, view.y + 26,
-                       "MIDI · VGM · GYM · ZIP", "tiny", t.pattern_empty)
+                       "MIDI · VGM · GYM · NDS · ZIP", "tiny", t.pattern_empty)
         for slot in range(min(visible, len(self.items) - self.scroll_queue)):
             index = slot + self.scroll_queue
             item = self.items[index]
@@ -1293,23 +1571,51 @@ class App:
                 self.screen.fill(t.accent_dark, row)
             elif row.collidepoint(self.mouse):
                 self.screen.fill(t.stripe, row)
+            archive = item.is_archive()
             self._text(row.x + 3, row.y + 3, "%02d" % (index + 1), "head",
                        t.bad if failed else t.pattern_vol)
             name_colour = t.bad if failed else (t.playing_text if working
                                                 else t.field_text)
+            name_width = row.width - (196 if archive else 106)
             self._text(row.x + 30, row.y + 3,
-                       _fit(self.fonts["small"], item.name, row.width - 106),
+                       _fit(self.fonts["small"], item.name, name_width),
                        "small", name_colour)
-            if failed:
-                tag, colour = "FAIL", t.bad
-            elif working:
-                tag, colour = "%d%%" % int(item.fraction * 100), t.playing_text
+            close_x = row.right - 24
+            if archive:
+                # a DS archive holds many songs: say which one, and offer the list
+                songs_width = max(52, self.fonts["tiny"].size("SONGS")[0] + 12)
+                songs_button = pygame.Rect(row.right - 24 - songs_width - 4,
+                                           row.y + 3, songs_width, row_h - 8)
+                theme.button(self.screen, songs_button, t, "SONGS",
+                             self.fonts["tiny"])
+                self.hits.append((songs_button.copy(),
+                                  (lambda i=index: self.open_songs(i))))
+                if item.catalogue_note:
+                    tag, colour = "no songs", t.bad
+                elif item.catalogue is None:
+                    tag, colour = "reading…", t.pattern_empty
+                else:
+                    tag = "%d/%d  %s" % (item.song_number(), item.song_count(),
+                                         item.song())
+                    colour = t.playing_text if working else t.pattern_inst
+                tag_surface = self.fonts["tiny"].render(
+                    _fit(self.fonts["tiny"], tag, 116), t.smooth, colour)
+                self.screen.blit(tag_surface,
+                                 (songs_button.x - tag_surface.get_width() - 6,
+                                  row.y + 4))
+                self.hits.append((row.copy(), (lambda i=index: self.open_songs(i))))
             else:
-                tag, colour = "WAIT", t.pattern_empty
-            tag_surface = self.fonts["tiny"].render(tag, t.smooth, colour)
-            self.screen.blit(tag_surface,
-                             (row.right - tag_surface.get_width() - 30, row.y + 4))
-            close = pygame.Rect(row.right - 24, row.y + 3, 22, row_h - 8)
+                if failed:
+                    tag, colour = "FAIL", t.bad
+                elif working:
+                    tag, colour = "%d%%" % int(item.fraction * 100), t.playing_text
+                else:
+                    tag, colour = "WAIT", t.pattern_empty
+                tag_surface = self.fonts["tiny"].render(tag, t.smooth, colour)
+                self.screen.blit(tag_surface,
+                                 (close_x - tag_surface.get_width() - 6,
+                                  row.y + 4))
+            close = pygame.Rect(close_x, row.y + 3, 22, row_h - 8)
             theme.button(self.screen, close, t, "x", self.fonts["tiny"])
             self.hits.append((close.copy(), (lambda i=index: self.remove_item(i))))
             if working:
@@ -1407,6 +1713,152 @@ class App:
                                                     else t.pattern_vol))
             self.hits.append((row.copy(), (lambda i=index: self.select_result(i))))
 
+    # ------------------------------------------------------------ song browser
+
+    def _draw_song_window(self, outer: pygame.Rect) -> None:
+        """A floating FT2-style list of the songs inside a DS archive."""
+        t = self.theme
+        window = self.song_window
+        item = window["item"]
+        catalogue = item.catalogue
+
+        width = max(440, min(680, int(outer.width * 0.64)))
+        rows = max(3, min(13, len(catalogue["songs"]) if catalogue else 6))
+        height = max(206, min(int(outer.height * 0.7),
+                              rows * window["row_h"] + 136))
+        box = pygame.Rect(outer.centerx - width // 2,
+                          outer.centery - height // 2, width, height)
+
+        # a soft shadow, so it reads as a window lying on the desk
+        shade = pygame.Surface((box.width + 8, box.height + 8), pygame.SRCALPHA)
+        shade.fill((0, 0, 0, 70))
+        self.screen.blit(shade, (box.x + 5, box.y + 5))
+        title = "SONGS IN  %s" % _fit(self.fonts["tiny"], item.name, width - 90)
+        inner = theme.panel(self.screen, box, t, title, self.fonts["tiny"])
+
+        head = self.fonts["tiny"]
+        if catalogue:
+            summary = "%d song%s · %d bank%s · %d wave archive%s" % (
+                len(catalogue["songs"]), "" if len(catalogue["songs"]) == 1 else "s",
+                catalogue["banks"], "" if catalogue["banks"] == 1 else "s",
+                catalogue["waves"], "" if catalogue["waves"] == 1 else "s")
+        elif item.catalogue_note:
+            summary = item.catalogue_note
+        else:
+            summary = "reading the archive…"
+        summary_rect = pygame.Rect(inner.x, inner.y, inner.width,
+                                   head.get_height() + 5)
+        theme.field(self.screen, summary_rect, t, t.field)
+        self._text(summary_rect.x + 5, summary_rect.y + 2,
+                   _fit(head, summary, summary_rect.width - 10), "tiny",
+                   t.field_text)
+
+        footer_h = 58
+        list_rect = pygame.Rect(inner.x, summary_rect.bottom + 4, inner.width,
+                                inner.height - summary_rect.height - 4 - footer_h)
+        theme.field(self.screen, list_rect, t, t.field)
+        self.song_list_view = list_rect
+
+        row_h = window["row_h"]
+        songs = self._window_songs()
+        visible = max(1, (list_rect.height - 4) // row_h)
+        window["scroll"] = max(0, min(window["scroll"],
+                                      max(0, len(songs) - visible)))
+        self.song_rows = []
+        if not songs:
+            self._text(list_rect.x + 8, list_rect.y + 8,
+                       "no songs to list" if catalogue else "reading…", "small",
+                       t.field_text)
+        for slot in range(min(visible, len(songs) - window["scroll"])):
+            position = slot + window["scroll"]
+            _index, bank, name = songs[position]
+            row = pygame.Rect(list_rect.x + 2, list_rect.y + 2 + slot * row_h,
+                              list_rect.width - 16, row_h - 1)
+            selected = position == window["selected"]
+            if selected:
+                self.screen.fill(t.playing, row)
+            elif row.collidepoint(self.mouse):
+                self.screen.fill(t.stripe, row)
+            number = self.fonts["head"].render("%02d" % (position + 1), t.smooth,
+                                               t.playing_text if selected
+                                               else t.field_text)
+            self.screen.blit(number, (row.x + 4, row.y + 2))
+            bank_text = self.fonts["tiny"].render("bank %d" % bank, t.smooth,
+                                                  t.playing_text if selected
+                                                  else t.field_text)
+            self.screen.blit(bank_text, (row.x + 34, row.y + 3))
+            chosen = name.lower() == item.song().lower()
+            self._text(row.x + 100, row.y + 1,
+                       _fit(self.fonts["body"], name, row.width - 210), "body",
+                       t.playing_text if selected else t.field_text)
+            if chosen:
+                tick = self.fonts["tiny"].render("CURRENT", t.smooth,
+                                                 t.playing_text if selected
+                                                 else t.field_text)
+                self.screen.blit(tick, (row.right - tick.get_width() - 4,
+                                        row.y + 3))
+            self.song_rows.append((position, row.copy()))
+            self.hits.append((row.copy(), (lambda p=position: self.pick_song_row(p))))
+
+        if len(songs) > visible:
+            track = pygame.Rect(list_rect.right - 12, list_rect.y + 1, 11,
+                                list_rect.height - 2)
+            fraction = window["scroll"] / float(max(1, len(songs) - visible))
+            theme.scrollbar(self.screen, track, t, fraction,
+                            visible / float(len(songs)))
+
+        # --- footer: bank, then the three things you can do
+        footer = pygame.Rect(inner.x, inner.bottom - footer_h + 4, inner.width,
+                             footer_h - 4)
+        self.screen.fill(t.face, footer)
+        self.screen.fill(t.groove, (footer.x, footer.y, footer.width, 1))
+
+        button_h = 28
+        small = self.fonts["tiny"]
+
+        def fit_width(text: str) -> int:
+            return small.size(text)[0] + 16
+
+        cancel = pygame.Rect(footer.right - fit_width("CANCEL"), footer.y + 14,
+                             fit_width("CANCEL"), button_h)
+        gap = 6
+        use = pygame.Rect(cancel.x - fit_width("USE THIS SONG") - gap, footer.y + 14,
+                          fit_width("USE THIS SONG"), button_h)
+        all_songs = pygame.Rect(use.x - fit_width("ADD ALL SONGS") - gap,
+                                footer.y + 14, fit_width("ADD ALL SONGS"),
+                                button_h)
+        self._button(cancel, "CANCEL", self.close_songs, font="tiny")
+        self._button(all_songs, "ADD ALL SONGS", self.add_all_songs,
+                     enabled=bool(songs), font="tiny")
+        self._button(use, "USE THIS SONG", self.use_song, enabled=bool(songs),
+                     primary=True, font="tiny")
+
+        banks = (catalogue or {}).get("banks", 0) or 1
+        label = self.fonts["tiny"].render("BANK", t.smooth, t.dim)
+        self.screen.blit(label, (footer.x + 2, footer.y + 2))
+        value = window["bank"]
+        if value == "":
+            songs_now = self._window_songs()
+            shown = (str(songs_now[window["selected"]][1])
+                     if songs_now else "0") + " *"
+        else:
+            shown = value
+        field = pygame.Rect(footer.x + 2, footer.y + 16, 54, 24)
+        theme.numeric(self.screen, field, t, shown, self.fonts["small"])
+        up = pygame.Rect(field.right + 3, field.y, 22, 12)
+        down = pygame.Rect(field.right + 3, field.y + 12, 22, 12)
+        for arrow_rect, step in ((up, 1), (down, -1)):
+            theme.arrow(self.screen, arrow_rect, t, "up" if step > 0 else "down")
+            self.hits.append((arrow_rect.copy(), (lambda s=step: self.change_bank(s))))
+        room = max(40, all_songs.x - (down.right + 8) - 6)
+        if banks > 1:
+            hint_text = "of %d banks · * = the song's own" % banks
+        else:
+            hint_text = "the only bank in this archive"
+        hint = self.fonts["tiny"].render(_fit(self.fonts["tiny"], hint_text, room),
+                                         t.smooth, t.pattern_empty)
+        self.screen.blit(hint, (down.right + 8, footer.y + 22))
+
     def play_selected(self) -> None:
         self.play(self.selected_result)
 
@@ -1499,10 +1951,34 @@ def _selftest_ds_rom(app, check) -> None:
 
     rom = None
     try:
-        rom = make_test_rom.write(os.path.join(tempfile.mkdtemp(), "gui.nds"))
+        rom = make_test_rom.write(os.path.join(tempfile.mkdtemp(), "gui.nds"),
+                                  two_songs=True)
         app.add_path(rom)
         check("a DS ROM can be queued", any(item.path == rom for item in app.items),
               str([item.name for item in app.items]))
+
+        # the song browser: list the songs, pick the second one, then convert it
+        deadline = time.time() + 30
+        while app.items[0].catalogue is None and time.time() < deadline:
+            app._drain()
+            time.sleep(0.02)
+        app._drain()
+        check("the ROM's songs are listed",
+              bool(app.items[0].catalogue),
+              app.items[0].catalogue_note or "no catalogue")
+        app.open_songs(0)
+        app.draw()
+        check("the song browser opens over the window",
+              bool(app.song_window) and len(app.song_rows) >= 2,
+              str(len(app.song_rows)))
+        app.move_song(1)
+        app.draw()
+        app.use_song()
+        check("a song can be picked for one file",
+              app.items[0].sequence != "" and
+              app.items[0].sequence != app.items[0].catalogue["chosen"],
+              app.items[0].sequence or "nothing picked")
+        check("the browser closes when a song is picked", app.song_window is None)
         app.settings.extensions = []
         app.start_convert()
         deadline = time.time() + 120
@@ -1518,6 +1994,9 @@ def _selftest_ds_rom(app, check) -> None:
         app.draw()
         check("the window still draws after a DS conversion",
               app.screen is not None)
+        check("the window says which song it converted",
+              bool(app.results) and app.results[0].song != "",
+              app.results[0].song if app.results else "no result")
         if app.results and app.results[0].ok:
             app.play(0)
             check("the DS result plays like any other", app.playing is not None,

@@ -16,7 +16,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import make_test_midi                                     # noqa: E402
-from nescore import analyze, chips, importers              # noqa: E402
+from nescore import analyze, chips, convert, importers      # noqa: E402
 from nescore import mix as mix_module                     # noqa: E402
 from nescore import samples as samples_module              # noqa: E402
 from nescore import arrange as arrange_module             # noqa: E402
@@ -596,6 +596,84 @@ def main_test() -> None:
         check("a wrong song name is refused", False)
     except nds.NdsError as error:
         check("a wrong song name is refused", "NOPE" in str(error), str(error))
+
+    print("DS song lists (what the window's song browser asks for)")
+    archive, title = nds.open_archive(two_songs)
+    check("the archive opens without decoding a song",
+          [entry.name for entry in archive.sequences] == ["BGM_MAIN", "BGM_BOSS"],
+          str([entry.name for entry in archive.sequences]))
+    check("the archive reader reports a title line", isinstance(title, str),
+          repr(title))
+    best = archive.best_sequence()
+    check("the archive reader names the song it would use",
+          getattr(best, "name", "") == "BGM_MAIN", str(best))
+
+    catalogue = importers.catalogue(two_songs)
+    check("the catalogue lists both songs by name and index",
+          [name for _index, _bank, name in catalogue["songs"]] ==
+          ["BGM_MAIN", "BGM_BOSS"], str(catalogue["songs"]))
+    check("the catalogue counts the banks and wave archives",
+          catalogue["banks"] == 1 and catalogue["waves"] == 1, str(catalogue))
+    check("the catalogue says which song comes out by default",
+          catalogue["chosen"] == "BGM_MAIN", str(catalogue.get("chosen")))
+
+    single = make_test_rom.write(os.path.join(work, "one.nds"))
+    one = importers.catalogue(single)
+    check("a one-song ROM lists its one song",
+          [name for _index, _bank, name in one["songs"]] == ["BGM_MAIN"],
+          str(one["songs"]))
+
+    sseq_path = os.path.join(work, "bare.sseq")
+    with open(sseq_path, "wb") as handle:
+        handle.write(make_test_rom.build_sseq())
+    bare = importers.catalogue(sseq_path)
+    check("a bare SSEQ is a one-song archive", len(bare["songs"]) == 1,
+          str(bare["songs"]))
+
+    for bad_name, builder in (("bank.sbnk", make_test_rom.build_sbnk),
+                              ("notes.txt", lambda: b"not a DS file at all")):
+        bad_path = os.path.join(work, bad_name)
+        with open(bad_path, "wb") as handle:
+            handle.write(builder())
+        try:
+            nds.open_archive(bad_path)
+            check("a file that holds no songs is refused (%s)" % bad_name, False)
+        except nds.NdsError as error:
+            check("a file that holds no songs is refused (%s)" % bad_name,
+                  "song" in str(error) or "not a DS" in str(error), str(error))
+
+    print("DS songs keep their own file names")
+    song_dir = os.path.join(work, "songs")
+    os.makedirs(song_dir, exist_ok=True)
+    boss_result = convert.convert_file(
+        two_songs, convert.Settings(sequence="BGM_BOSS"), output_dir=song_dir)
+    check("the picked song is the one converted",
+          boss_result.ok and boss_result.song == "BGM_BOSS",
+          str(getattr(boss_result, "error", boss_result.song)))
+    check("the window's per-file settings carry the song",
+          boss_result.song_index == 2 and boss_result.song_count == 2,
+          "%s of %s" % (boss_result.song_index, boss_result.song_count))
+    main_result = convert.convert_file(
+        two_songs, convert.Settings(), output_dir=song_dir)
+    made = sorted(os.listdir(song_dir))
+    check("two songs of one ROM do not overwrite each other",
+          len([name for name in made if name.endswith(".wav")]) == 2 and
+          len([name for name in made if name.endswith(".mid")]) == 2 and
+          len([name for name in made if name.endswith(".sf2")]) == 2, str(made))
+    check("each file name says which song it holds",
+          any("BGM_MAIN" in name for name in made) and
+          any("BGM_BOSS" in name for name in made), str(made))
+    check("a name inside the song cannot escape the folder",
+          convert._plain_name("../../BGM/ONE\x00") == "BGM_ONE",
+          convert._plain_name("../../BGM/ONE\x00"))
+    check("a readable song name is kept as it is",
+          convert._plain_name("BGM 01 - Field") == "BGM 01 - Field",
+          convert._plain_name("BGM 01 - Field"))
+    check("an empty song name still gives a file name",
+          convert._plain_name("   ") == "song", convert._plain_name("   "))
+    check("both conversions succeeded",
+          boss_result.ok and main_result.ok,
+          "%s / %s" % (boss_result.error, main_result.error))
 
     print("DS sequence reader: commands, banks, loops")
     plain = nds.read_sequence(make_test_rom.build_sseq())

@@ -1035,33 +1035,51 @@ def load(path: str, sequence: str = "", bank: str = "") -> Tuple[Song, Archive,
     return load_bytes(data, path, sequence, bank)
 
 
-def load_bytes(data: bytes, path: str = "", sequence: str = "",
-               bank: str = "") -> Tuple[Song, Archive, SequenceEntry, int]:
-    extension = os.path.splitext(path)[1].lower()
+def open_archive(path: str) -> Tuple[Archive, str]:
+    """Read only the archive: which songs, banks and wave archives a file holds.
 
+    That is what a song list needs, and it is much cheaper than reading a
+    sequence — a 64 MB ROM still has to be read, but nothing is decoded.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    return archive_from_bytes(data, path)
+
+
+def archive_from_bytes(data: bytes, path: str = "") -> Tuple[Archive, str]:
+    """The SDAT inside a ROM / SDAT, or a one-sequence stand-in for an SSEQ."""
     if data[:4] == b"SSEQ":
-        entry = SequenceEntry(index=0, name=os.path.basename(path) or "SSEQ",
-                              bank=int(bank) if str(bank).isdigit() else 0,
-                              volume=100, sseq=data)
         archive = Archive(name=os.path.basename(path) or "SSEQ")
-        archive.sequences.append(entry)
-        song = read_sequence(data)
-        song.source_path = path
-        return song, archive, entry, entry.bank
+        archive.sequences.append(SequenceEntry(
+            index=0, name=os.path.splitext(os.path.basename(path))[0] or "SSEQ",
+            bank=0, volume=100, sseq=data))
+        return archive, archive.name
 
     if data[:4] == b"SDAT":
-        archive = Archive.from_bytes(data, os.path.basename(path) or "SDAT")
-    elif data[:4] == b"SWAR" or data[:4] == b"SBNK":
-        raise NdsError("that is a bank or a wave archive, not a ROM — drop the "
-                       ".nds (or the .sdat) that contains it")
-    else:
-        if extension in (".nds", ""):
-            rom = Rom(data)
-            blob = rom.find_sdat()
-            archive = Archive.from_bytes(blob, rom.title)
-        else:
-            raise NdsError("not a DS ROM, SDAT or SSEQ")
+        return Archive.from_bytes(data, os.path.basename(path) or "SDAT"), ""
 
+    if data[:4] in (b"SWAR", b"SBNK"):
+        raise NdsError("that is a bank or a wave archive, and it holds no "
+                       "songs — drop the .nds (or the .sdat) that contains it")
+
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in (".nds", ""):
+        raise NdsError("not a DS ROM, SDAT or SSEQ")
+    rom = Rom(data)
+    blob = rom.find_sdat()
+    return Archive.from_bytes(blob, rom.title), ""
+
+
+def load_bytes(data: bytes, path: str = "", sequence: str = "",
+               bank: str = "") -> Tuple[Song, Archive, SequenceEntry, int]:
+    if data[:4] == b"SSEQ":
+        archive, _title = archive_from_bytes(data, path)
+        entry = archive.sequences[0]
+        song = read_sequence(entry.sseq)
+        song.source_path = path
+        return song, archive, entry, 0
+
+    archive, _title = archive_from_bytes(data, path)
     entry = archive.find_sequence(sequence)
     song = read_sequence(entry.sseq)
     song.source_path = path
@@ -1073,9 +1091,10 @@ def load_bytes(data: bytes, path: str = "", sequence: str = "",
             "--sequence NAME, or --list-songs to see them)"
             % (total, entry.name) if not sequence else
             "converted '%s' out of %d songs" % (entry.name, total))
+    chosen_bank = int(bank) if str(bank).isdigit() else entry.bank
     asked_for = getattr(song, "ds_bank", None)
-    chosen_bank = (int(bank) if str(bank).isdigit() else
-                   asked_for if asked_for is not None else entry.bank)
+    if not str(bank).isdigit() and asked_for is not None:
+        chosen_bank = asked_for
     if not (0 <= chosen_bank < len(archive.banks)) and archive.banks:
         chosen_bank = 0
     return song, archive, entry, chosen_bank

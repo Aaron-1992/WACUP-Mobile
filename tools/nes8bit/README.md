@@ -35,8 +35,8 @@ window, no browser anywhere), laid out like FastTracker II v2.04: one lavender d
 with the panels **cut into** it, so nothing floats on a coloured background.
 
 1. **Add music** — drag files onto the window, press *ADD MUSIC* (the real Windows
-   file dialog), or drop them straight onto `chip8bit.exe`. MIDI, VGM/VGZ, GYM, and
-   `.zip` of any of those. Anything else is refused immediately with the reason
+   file dialog), or drop them straight onto `chip8bit.exe`. MIDI, VGM/VGZ, GYM, a
+   Nintendo DS `.nds`/`.sdat` (see below), and `.zip` of any of those. Anything else is refused immediately with the reason
    rather than failing halfway through a batch. *DEMO* queues a tune to play with.
 2. **Pick chips** — the `CHIPS` box lists what each extension chip adds; `ALL` and
    `NONE` in its title line switch the whole set. `VOICES` and `CHIPS` in the header
@@ -141,8 +141,20 @@ music and the instrument bank out of it, then converts the song like any other f
   SoundFont 2 with the bank's instruments and its samples, so the same music can be
   played or edited outside this tool).
 
-Where the ROM keeps several songs, the first one is converted and the window says
-how many there are. To choose:
+![the song browser over the desk](docs/window-songs.png)
+
+Where the ROM keeps several songs, its row in `FILES TO CONVERT` shows which song it
+will convert out of how many (`1/24  BGM_MAIN`) and a **SONGS** button opens the song
+browser: every sequence in the archive, numbered, with its bank, the current one
+marked, a scroll wheel for long archives and a bank box for the odd song that uses a
+different bank. Pick with the mouse (a double click takes it), `↑` `↓` `PageUp`
+`PageDown` `Home` `End` then `ENTER`, or `ESC` to leave it as it was. *ADD ALL SONGS*
+queues every song in the archive as its own row, so a whole soundtrack converts in
+one go — and since a multi-song archive names its files after the song
+(`rom BGM_BOSS [nes].wav`, `rom BGM_BOSS.mid`, `rom BGM_BOSS.sf2`), two songs of one
+ROM never overwrite each other.
+
+From the command line it is the same list:
 
 ```
 chip8bit-cli.exe --cli --list-songs rom.nds
@@ -150,8 +162,9 @@ chip8bit-cli.exe --cli rom.nds --sequence "BGM_BOSS" --stats
 chip8bit-cli.exe --cli rom.nds --sequence 12 --bank 3 --stats
 ```
 
-`--sequence` takes a name fragment or a number; `--bank` overrides the bank the
-song asks for.
+`--sequence` takes a name fragment or a number as `--list-songs` prints it (the
+archive's own index, counting from 0); `--bank` overrides the bank the song asks for.
+The window numbers the same songs from 1, the way a person counts them.
 
 **Nothing is bundled and nothing is downloaded.** Every byte written comes out of the
 file you opened; the project ships no game data.
