@@ -468,7 +468,32 @@ def main_test() -> None:
             check("%s produced sound" % name, rms(
                 bytes(int((v * 0.5 + 0.5) * 255) for v in ext_stems[name])) > 0.5)
 
-    print("voice budgeting (a few lines, not every part at once)")
+    print("more chips never means less music")
+    steps = (("bare NES", []), ("2x NES", ["dual"]),
+             ("2x NES + PC Engine", ["dual", "pce"]),
+             ("everything", list(chips.EXTENSION_CHANNELS)))
+    for test_path, test_name in ((midi_path, "the demo tune"),
+                                 (band_path, "the band tune"),
+                                 (fast_path, "the 226 BPM tune")):
+        track_song = importers.find_for(test_path)(test_path)
+        track_analysis = analyze.analyse(track_song)
+        counts = []
+        thinned = []
+        for _label, extensions in steps:
+            channel_set = chips.build_channel_set(extensions)
+            step_notes, step_stats = arrange(track_song, channel_set, Options(),
+                                             analysis=track_analysis)
+            counts.append(len(step_notes))
+            thinned.append(step_stats.voices_thinned)
+        check("%s keeps at least as many notes with every chip on" % test_name,
+              counts == sorted(counts), str(counts))
+        check("%s has no whole line thrown away by the chips" % test_name,
+              not any(thinned), str(thinned))
+
+    check("the arranger does not cap lines unless it is asked to",
+          Options().voice_budget is None)
+
+    print("a line budget, when it is asked for, thins whole lines and says so")
     crowd = []
     for voice_index in range(6):                 # six harmony lines at once
         for step in range(8):
@@ -477,7 +502,8 @@ def main_test() -> None:
                               velocity=90 - voice_index * 6,
                               part=voice_index + 1, role="harmony",
                               voice=voice_index))
-    budget = arrange_module._voice_budget(22)
+    budget = {"melody": 1, "bass": 1, "drum": 1, "counter": 1,
+              "rhythm": 1, "harmony": 2}
     crowd_stats = arrange_module.Stats()
     kept_crowd = arrange_module._thin_voices(crowd, budget, crowd_stats)
     check("too many lines get thinned, and it is reported",
@@ -490,16 +516,12 @@ def main_test() -> None:
           str(sorted({n.pitch for n in kept_crowd})))
     check("thinning is explained in the stats text",
           any("thinned" in line for line in crowd_stats.as_lines()))
-    check("a big console still gets an arrangement-sized budget",
-          2 <= budget["harmony"] <= 8 and budget["melody"] == 1, str(budget))
-    check("a bare NES is left alone (contention already picks the best line)",
-          arrange_module._voice_budget(4) is None)
-    budget_notes, _ = arrange(
+    budget_notes, budget_stats = arrange(
         fast_song, chips.build_channel_set(list(chips.EXTENSION_CHANNELS)),
-        Options(), analysis=fast_analysis)
-    check("exactly one melody line is used",
-          len({n.channel for n in budget_notes if n.role == "melody"}) <= 1)
-    check("the tune survives the thinning",
+        Options(voice_budget=budget), analysis=fast_analysis)
+    check("an asked-for budget really is applied",
+          budget_stats.voices_thinned > 0, str(budget_stats.voices_thinned))
+    check("and it never costs the melody",
           sum(1 for n in budget_notes if n.role == "melody") >= 0.95 * sum(
               1 for n in fast_song.notes if n.role == "melody"),
           str(sum(1 for n in budget_notes if n.role == "melody")))

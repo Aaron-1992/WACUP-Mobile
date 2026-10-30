@@ -106,10 +106,11 @@ class Options:
     # A chip channel is monophonic: pretending otherwise is what makes converted
     # music sound like a wasp in a jar. Sharing is therefore strictly rationed.
     dedupe: bool = True
-    # How many separate lines of each kind the arrangement is allowed to use.
-    # 0 = decide from the number of channels (see _voice_budget). A console tune
-    # is a handful of lines, not every part of an orchestral MIDI at once.
-    voice_budget: Optional[Dict[str, int]] = None               # drop notes that double another part exactly
+    # Optional cap on how many separate lines of each kind the arrangement may
+    # use, e.g. {"melody": 1, "harmony": 2}. Off by default: the channels run
+    # out on their own, and dropping a whole part to keep the mix tidy is not
+    # this tool's job unless you ask for it.
+    voice_budget: Optional[Dict[str, int]] = None
     max_cluster_notes: int = 3        # never arpeggiate more than a triad
     min_cluster_seconds: float = 0.12  # short blips are not worth splitting
     share_budget: float = 0.10        # at most this share of the notes may share
@@ -144,7 +145,8 @@ class Stats:
                 if self.left_out.get(role):
                     lines.append("    of which %-31s: %d" % (role, self.left_out[role]))
         lines += [
-            "  extra lines thinned out (too many at once): %d" % self.voices_thinned,
+            "  lines thinned out (only if a budget was asked for): %d"
+            % self.voices_thinned,
         ]
         if self.thinned:
             for role in ("harmony", "drum", "counter", "rhythm", "bass", "melody"):
@@ -294,28 +296,6 @@ def _pan_for(note: Note, spec: ChannelSpec) -> float:
     return round(side * reach * 7.0) / 7.0
 
 
-def _voice_budget(channel_count: int) -> Optional[Dict[str, int]]:
-    """How many separate lines of each kind an arrangement may use.
-
-    A bare NES has four voices and the channel contention already picks the best
-    line for every note, so nothing is thrown away there. Once extension chips are
-    switched on there are up to 22 voices, and a full-band MIDI export will happily
-    occupy every one of them at once: five guitar parts and eleven harmony lines is
-    not an arrangement, it is mud. In that case keep the strongest few lines of
-    each kind — which is what the composer of a chip tune would have done anyway.
-    """
-    if channel_count < 8:
-        return None
-    return {
-        "melody": 1,                       # one lead, always
-        "bass": 2,
-        "drum": 2,
-        "counter": max(2, channel_count // 5),
-        "rhythm": 1,
-        "harmony": max(3, channel_count // 4),
-    }
-
-
 def _thin_voices(notes: List[Note], budget: Dict[str, int],
                  stats: Stats) -> List[Note]:
     """Keep the strongest few lines of each kind, drop the rest.
@@ -437,11 +417,14 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     _articulate(source_notes)
     if options.dedupe:
         source_notes = _dedupe(source_notes, stats)
-    budget = options.voice_budget
-    if budget is None:
-        budget = _voice_budget(len(channels))
-    if budget:
-        source_notes = _thin_voices(source_notes, budget, stats)
+    # No automatic line budget. There used to be one, switched on from eight
+    # voices up, which deleted whole harmony and drum lines "so the mix stays
+    # readable" — with the perverse result that switching a chip on could lose
+    # you more notes than a bare NES played (on one test file: 92 notes on four
+    # voices, 46 on eight). Switching a chip on must never take music away, so
+    # the cap is now opt-in: pass Options.voice_budget if you want it.
+    if options.voice_budget:
+        source_notes = _thin_voices(source_notes, options.voice_budget, stats)
     share_budget = int(len(source_notes) * max(0.0, options.share_budget))
     # a song with a bass line keeps the triangle for it (see _wanted_kinds)
     has_bass = any(note.role == "bass" for note in source_notes)

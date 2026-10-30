@@ -248,13 +248,17 @@ jobs:
             note on its own MIDI pitch, and the triangle stays with the bass line
             instead of being taken by a chord tone for half a beat.
 
+            **A chip never takes music away.** Switching on a second APU or a PC
+            Engine can only ever give you more notes, never fewer: the old "thin
+            the mix" cap that deleted whole harmony and drum lines from eight
+            voices up is gone, so the notes-kept count only goes up as you add
+            chips. A line is left out only when no voice is free at that moment,
+            and every one of those is counted and reported.
+
             Sound: drums are real samples through the delta channel, every note has
             an attack/release so nothing clicks, and the mix is balanced by role —
             melody on top, bass under it, the chord bed underneath, drums in front
-            of the bed. When every voice is busy the note is left out and counted;
-            when a full-band MIDI asks for twenty lines at once, the strongest few
-            are kept and the rest are reported as thinned. Nothing is crammed in as
-            an arpeggio.
+            of the bed. Nothing is crammed in as an arpeggio.
 
             `demo-*.wav` are the built-in test tune on the bare NES, on the console
             with every extension chip enabled, on two NES APUs plus a PC Engine, and

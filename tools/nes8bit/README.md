@@ -81,7 +81,7 @@ with the panels **cut into** it, so nothing floats on a coloured background.
 
 `WHAT I FOUND` in the header shows the analysis of the selected song: the
 instruments it identified, how the tracks were split into voices, and
-`2980 notes kept · 6 left out · 7 lines thinned`.
+`2980 notes kept · 6 left out`.
 
 ### The pattern page
 
@@ -330,11 +330,13 @@ channels and sounds bad" was.) The rules:
    disappears;
 8. every line keeps **its own channel** once it has one, so a chord sounds like a
    chord and the part does not jump between voices;
-9. with extension chips on, at most a **handful of separate lines** play at once
-   (one melody, one rhythm, a few counter-melodies, the strongest chord voices).
-   A full-band MIDI export has five guitar parts and eleven harmony lines; that is
-   not an arrangement, it is mud, so the strongest lines are kept and the rest are
-   reported as thinned;
+9. **switching a chip on never takes music away.** There used to be a "mix stays
+   readable" cap that started at eight voices and deleted whole harmony and drum
+   lines — so turning on a second APU could leave you with *fewer* notes than a
+   bare NES played (92 notes on four voices, 46 on eight, on one test file). It is
+   gone: the channels run out on their own, and a line is only left out when there
+   really is no voice free at that moment. A line budget is still available if you
+   ask for one (`Options.voice_budget`), and then it says what it dropped;
 10. a note outside what its voice can physically play (below A1 on a pulse, above
    C7) is **moved by whole octaves** into range instead of being rendered as a
    click or dropped — the same thing a chip composer does by hand, counted in the
@@ -353,13 +355,12 @@ a chord bed, a counter line, a bass and a busy kit):
 | second APU alone (`--no-nes --extensions dual`) | 4 | 264 | 99 | – |
 | PC Engine alone (`--no-nes --extensions pce`) | 6 | 312 | 51 | – |
 | + VRC6 | 7 | 333 | 30 | – |
-| + 2× NES | 8 | 347 | 0 | 1 |
-| + PC Engine | 10 | 347 | 0 | 1 |
-| everything | 32 | 363 | 0 | 0 |
+| + 2× NES | 8 | 357 | 6 | – |
+| + PC Engine | 10 | 363 | 0 | – |
+| everything | 32 | 363 | 0 | – |
 
-(The "lines thinned" budget only switches on from eight voices up — with four or
-six voices there is not enough room for mud, so channel contention alone decides
-and nothing is thrown away on purpose.)
+Read the "notes kept" column downwards: it only ever goes up. Adding a chip can
+never cost you a note, which was the whole point of adding it.
 
 On a bare NES that tune keeps the lead (96 notes), the counter line (48), the bass
 (24) and the kit (96); the chord bed is what goes, because four voices cannot hold
@@ -367,11 +368,12 @@ five parts. Every one of those 99 left-out notes is a note the console had no vo
 for at that moment — none of them is silently stacked on top of another one.
 
 On the built-in demo tune (169 notes): bare NES keeps 105 (53 left out: 24 drum,
-10 counter, 19 harmony), all chips keep 158. Nothing is ever dropped for being "too
-short" any more.
+10 counter, 19 harmony), 2x NES alone keeps 140, both consoles keep 152, all chips
+keep 158. Nothing is ever dropped for being "too short" any more, and nothing is
+dropped because a chip is switched on.
 
 `--stats` (and the result card) tells you the exact count of each outcome, including
-which lines were thinned and why.
+which lines were thinned and why, if you asked for a budget.
 
 ## How it sounds
 
