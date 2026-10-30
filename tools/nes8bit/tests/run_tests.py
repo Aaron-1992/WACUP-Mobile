@@ -424,6 +424,212 @@ def main_test() -> None:
     check("VGM notes have real timing", genesis.duration > 0.5,
           "%.2f" % genesis.duration)
 
+    print("Nintendo DS (a ROM built here, because no ROM may be shipped)")
+    from nescore import nds                                  # noqa: E402
+    import make_test_rom                                     # noqa: E402
+    rom_path = make_test_rom.write(os.path.join(work, "test.nds"))
+    ds_song, ds_archive, ds_entry, ds_bank = nds.load(rom_path)
+    check("DS ROM found and read", os.path.isfile(rom_path))
+    check("SDAT parsed: one sequence, one bank, one wave archive",
+          len(ds_archive.sequences) == 1 and len(ds_archive.banks) == 1
+          and len(ds_archive.waves) == 1,
+          "%d/%d/%d" % (len(ds_archive.sequences), len(ds_archive.banks),
+                        len(ds_archive.waves)))
+    check("sequence named from the SYMB block", ds_entry.name == "BGM_MAIN",
+          ds_entry.name)
+    check("every track arrived: 5 melody + 4 bass notes", len(ds_song.notes) == 9,
+          "got %d" % len(ds_song.notes))
+    check("tempo arrived", abs(ds_song.tempo - 150.0) < 0.5, str(ds_song.tempo))
+    melody = [n.pitch for n in ds_song.notes if n.part == 1]
+    check("program change and transpose arrived (60,64,67,72,67 + 12)",
+          melody == [72, 76, 79, 84, 79], str(melody))
+    check("track volume arrived (100/127 of velocity 100 = 79)",
+          all(n.velocity == 79 for n in ds_song.notes if n.part == 1),
+          str(sorted({n.velocity for n in ds_song.notes if n.part == 1})))
+    check("vibrato depth arrived",
+          any(abs(n.vibrato - 0.055) < 0.02 for n in ds_song.notes))
+    check("the loop was not followed (the song ends)",
+          3.1 < ds_song.duration < 3.4, "%.2f" % ds_song.duration)
+    check("bass line is on its own part",
+          sorted({round(n.start, 2) for n in ds_song.notes if n.part == 2})
+          == [0.0, 0.8, 1.6, 2.4],
+          str(sorted({round(n.start, 2) for n in ds_song.notes if n.part == 2})))
+
+    print("DS banks and samples")
+    zones = nds.read_bank(ds_archive.banks[0].sbnk)
+    check("three instruments in the bank", sum(1 for z in zones if z) == 3,
+          str(sum(1 for z in zones if z)))
+    check("a direct instrument covers the whole keyboard",
+          [(z.low, z.high, z.wave, z.root) for z in zones[0]] == [(0, 127, 0, 60)],
+          str([(z.low, z.high, z.wave, z.root) for z in zones[0]]))
+    check("a key-range instrument kept one zone per key",
+          [(z.low, z.high, z.root) for z in zones[1]] ==
+          [(40, 40, 60), (41, 41, 61), (42, 42, 62), (43, 43, 63)],
+          str([(z.low, z.high, z.root) for z in zones[1]]))
+    check("pan arrived in the zones", [z.pan for z in zones[1]] == [40, 48, 56, 64],
+          str([z.pan for z in zones[1]]))
+    check("a regional instrument split the keyboard in three",
+          [(z.low, z.high, z.root) for z in zones[2]] ==
+          [(0, 30, 48), (31, 60, 60), (61, 90, 40)],
+          str([(z.low, z.high, z.root) for z in zones[2]]))
+
+    waves = nds.read_wave_archive(ds_archive.waves[0])
+    check("three waves read", sorted(waves) == [0, 1, 2], str(sorted(waves)))
+    check("PCM8 wave: rate, length and loop",
+          waves[0]["rate"] == 16000 and len(waves[0]["pcm"]) == 64
+          and waves[0]["looped"] and waves[0]["loop_start"] == 8,
+          "%d samples" % len(waves[0]["pcm"]))
+    check("PCM16 wave decoded",
+          waves[1]["rate"] == 22050 and len(waves[1]["pcm"]) == 48
+          and not waves[1]["looped"],
+          "%d samples" % len(waves[1]["pcm"]))
+    _encoded, expected = make_test_rom.encode_adpcm(make_test_rom.ADPCM_SAMPLES)
+    check("ADPCM wave decoded exactly (state word, low nibble first)",
+          list(waves[2]["pcm"]) == expected,
+          "%d != %d samples" % (len(waves[2]["pcm"]), len(expected)))
+    check("ADPCM loop point counted in words, state word included",
+          waves[2]["loop_start"] == 0 and waves[2]["loop_end"] == 56,
+          "%d..%d" % (waves[2]["loop_start"], waves[2]["loop_end"]))
+
+    print("DS -> MIDI (the file the ROM describes)")
+    midi_out = os.path.join(work, "ds-out.mid")
+    with open(midi_out, "wb") as handle:
+        handle.write(nds.sequence_to_midi(ds_entry.sseq))
+    back = importers.find_for(midi_out)(midi_out)
+    check("written MIDI opens again", len(back.notes) == len(ds_song.notes),
+          "%d vs %d" % (len(back.notes), len(ds_song.notes)))
+    check("same notes, pitches and velocities",
+          sorted((round(n.start, 2), n.pitch, n.velocity) for n in back.notes) ==
+          sorted((round(n.start, 2), n.pitch, n.velocity) for n in ds_song.notes))
+    check("same tempo", abs(back.tempo - ds_song.tempo) < 0.5,
+          "%s vs %s" % (back.tempo, ds_song.tempo))
+
+    print("DS -> SoundFont (the bank's own instruments and samples)")
+    sf2_path = os.path.join(work, "ds-out.sf2")
+    _path, sample_count = nds.build_soundfont(ds_archive, ds_bank, sf2_path)
+    with open(sf2_path, "rb") as handle:
+        sf2 = handle.read()
+    check("sf2 is a RIFF soundfont", sf2[:4] == b"RIFF" and sf2[8:12] == b"sfbk")
+    check("sf2 carries every used sample", sample_count == 3, str(sample_count))
+    sf2_chunks = _sf2_chunks(sf2)
+    check("sf2 has all the required chunks",
+          all(name in sf2_chunks for name in
+              (b"ifil", b"smpl", b"phdr", b"pbag", b"pmod", b"pgen", b"inst",
+               b"ibag", b"imod", b"igen", b"shdr")),
+          str(sorted(name.decode("latin-1") for name in sf2_chunks)))
+    headers = _sf2_records(sf2, sf2_chunks, b"shdr", 46)
+    starts, ends, rates = [], [], []
+    for record in headers[:-1]:
+        start, end, _loop_start, _loop_end, rate = struct.unpack_from(
+            "<IIIII", record, 20)
+        starts.append(start)
+        ends.append(end)
+        rates.append(rate)
+    check("sample rates stored", sorted(rates) == [16000, 22050, 32768], str(rates))
+    check("samples laid end to end without overlap",
+          all(starts[index + 1] == ends[index] for index in range(len(starts) - 1)),
+          "%s / %s" % (starts, ends))
+    generators = [struct.unpack_from("<HH", record) for record
+                  in _sf2_records(sf2, sf2_chunks, b"igen", 4)]
+    operators = {operator for operator, _amount in generators}
+    check("zones carry key range, root key, pan, loop mode and sample id",
+          {43, 58, 17, 54, 53} <= operators, str(sorted(operators)))
+    pans = [struct.unpack("<h", record[2:4])[0] for record
+            in _sf2_records(sf2, sf2_chunks, b"igen", 4)
+            if record[:2] == b"\x11\x00"]
+    check("pan scaled to the SoundFont's 0.1% units",
+          sorted(pans) == [-190, -127, -63, 0, 0, 0, 0, 0], str(sorted(pans)))
+    presets = [record[:20].split(b"\x00")[0].decode("latin-1") for record
+               in _sf2_records(sf2, sf2_chunks, b"phdr", 38)]
+    check("one preset per instrument, plus the terminator",
+          len(presets) == 4 and presets[-1] == "EOP", str(presets))
+    check("smpl holds the PCM8 wave as 16-bit samples",
+          _sf2_sample_range(sf2, sf2_chunks, starts[0], ends[0] - starts[0]) ==
+          waves[0]["pcm"])
+    check("smpl holds the decoded ADPCM wave too",
+          _sf2_sample_range(sf2, sf2_chunks, starts[2], ends[2] - starts[2]) ==
+          waves[2]["pcm"])
+
+    print("DS conversion end to end")
+    ds_dir = os.path.join(work, "ds-out")
+    code = main([rom_path, "-o", ds_dir, "--stats"])
+    made = sorted(os.listdir(ds_dir)) if os.path.isdir(ds_dir) else []
+    check("cli converted a ROM", code == 0)
+    check("a wav, a mid and a sf2 were written",
+          any(name.endswith(".wav") for name in made)
+          and any(name.endswith(".mid") for name in made)
+          and any(name.endswith(".sf2") for name in made), str(made))
+    wav_name = [name for name in made if name.endswith(".wav")]
+    if wav_name:
+        with wave.open(os.path.join(ds_dir, wav_name[0])) as handle:
+            frames = handle.readframes(handle.getnframes())
+            seconds = handle.getnframes() / float(handle.getframerate())
+        check("the DS song rendered audible audio", rms(frames) > 5.0,
+              "rms %.2f" % rms(frames))
+        check("the DS song rendered its full length", 3.0 < seconds < 3.6,
+              "%.2f s" % seconds)
+    else:
+        check("the DS song rendered audible audio", False, "no wav")
+
+    two_songs = make_test_rom.write(os.path.join(work, "two-songs.nds"),
+                                    two_songs=True)
+    listed = nds.load(two_songs)[1].sequences
+    check("a two-song archive lists both", len(listed) == 2,
+          str([entry.name for entry in listed]))
+    first = nds.load(two_songs)[0]
+    check("the first song is used by default", len(first.notes) == 9,
+          "got %d" % len(first.notes))
+    check("and the reader says which song it took",
+          any("2 songs" in warning for warning in first.warnings),
+          str(first.warnings))
+    boss = nds.load(two_songs, "BGM_BOSS")[0]
+    check("a song can be picked by name",
+          len(boss.notes) == 3 and abs(boss.tempo - 90) < 0.5,
+          "%d notes, %s bpm" % (len(boss.notes), boss.tempo))
+    check("a song can be picked by number",
+          len(nds.load(two_songs, "1")[0].notes) == 3)
+    try:
+        nds.load(two_songs, "NOPE")
+        check("a wrong song name is refused", False)
+    except nds.NdsError as error:
+        check("a wrong song name is refused", "NOPE" in str(error), str(error))
+
+    print("DS sequence reader: commands, banks, loops")
+    plain = nds.read_sequence(make_test_rom.build_sseq())
+    extra = bytes([0xB0, 0x00, 0x10, 0x00,          # variable = 0x0010
+                   0xB8, 0x00, 0x20, 0x00,          # variable == 0x0020
+                   0xA1, 0xC0, 0x00])              # run 0xC0 from a variable
+    scripted = nds.read_sequence(make_test_rom.build_sseq(extra_melody=extra))
+    check("arithmetic, comparison and run-from-variable commands are stepped "
+          "over exactly",
+          len(scripted.notes) == len(plain.notes)
+          and [n.pitch for n in scripted.notes] == [n.pitch for n in plain.notes]
+          and not scripted.warnings,
+          "%d vs %d notes, %s" % (len(scripted.notes), len(plain.notes),
+                                  scripted.warnings))
+    random_notes = nds.read_sequence(make_test_rom.build_sseq(
+        extra_melody=bytes([0xA0, 0x00, 0x64, 0x30, 0x00, 0x10, 0x00, 0x20])))
+    check("a command it cannot size stops that track instead of inventing notes",
+          len(random_notes.notes) == 4
+          and any("0xA0" in warning for warning in random_notes.warnings),
+          "%d notes, %s" % (len(random_notes.notes), random_notes.warnings))
+    banked = nds.read_sequence(make_test_rom.build_sseq(program_value=(2 << 8) | 7))
+    check("the bank in a program change is read",
+          getattr(banked, "ds_bank", None) == 2
+          and sorted({n.program for n in banked.notes}) == [3, 7],
+          str(getattr(banked, "ds_bank", None)))
+
+    broken = os.path.join(work, "broken.nds")
+    with open(broken, "wb") as handle:
+        handle.write(b"\x00" * 512)
+    try:
+        nds.load(broken)
+        check("a file that is not a DS ROM is refused", False)
+    except Exception as error:
+        check("a file that is not a DS ROM is refused",
+              "nds" in str(error).lower() or "rom" in str(error).lower(),
+              str(error))
+
     print("command line")
     out_dir = os.path.join(work, "cli-out")
     code = main([midi_path, "-o", out_dir, "--extensions", "vrc6,mmc5", "--stats"])
@@ -532,6 +738,37 @@ def _write_fake_genesis_vgm(path: str) -> str:
     with open(path, "wb") as handle:
         handle.write(bytes(header) + bytes(data))
     return path
+
+
+def _sf2_chunks(data: bytes) -> dict:
+    """Every chunk of a SoundFont as {tag: (start, end)}, the LISTs unwrapped."""
+    chunks = {}
+
+    def walk(start: int, end: int) -> None:
+        position = start
+        while position + 8 <= end:
+            tag = data[position:position + 4]
+            size = struct.unpack_from("<I", data, position + 4)[0]
+            body = position + 8
+            if tag == b"LIST":
+                walk(body + 4, body + size)
+            else:
+                chunks[tag] = (body, body + size)
+            position = body + size + (size & 1)
+
+    walk(12, len(data))
+    return chunks
+
+
+def _sf2_records(data: bytes, chunks: dict, tag: bytes, size: int) -> list:
+    start, end = chunks[tag]
+    return [data[start + offset:start + offset + size]
+            for offset in range(0, end - start, size)]
+
+
+def _sf2_sample_range(data: bytes, chunks: dict, start: int, count: int) -> list:
+    offset, _end = chunks[b"smpl"]
+    return list(struct.unpack_from("<%dh" % count, data, offset + start * 2))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # chip8bit — NES / 8-bit chiptune transcoder
 
-Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, or a `.zip` of them) and
-re-composes them for the NES sound chip, then renders 8-bit audio.
+Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs**, or a
+`.zip` of them) and re-composes them for the NES sound chip, then renders 8-bit audio.
 
 * **its own window, in 1995** — a FastTracker II desk: a thin blue window edge, one
   lavender surface with every panel cut into it, per-channel waveform scopes, and the
@@ -124,6 +124,52 @@ note is dropped and counted, never arpeggio-crammed into another channel.
 
 That is 4 voices bare and 22 with everything enabled.
 
+## Nintendo DS ROMs
+
+Drop a `.nds` on the window (or a `.sdat`, or a bare `.sseq`) and the tool pulls the
+music and the instrument bank out of it, then converts the song like any other file:
+
+* **the sequence** is read from the archive's SSEQ — tempo, every track, track
+  volume, expression, transpose, program changes, vibrato depth and ties all arrive
+  the way the game's driver plays them, and a jump loop is played once rather than
+  followed forever;
+* **the bank** is read from the SBNK plus the SWAR wave archives it points at:
+  direct instruments, key-range instruments and the eight-region kind, with each
+  zone's root key, pan and loop points;
+* **two files are written next to the `.wav`** — `<song>.mid` (a real Standard MIDI
+  File, format 1, 48 ticks per quarter, the DS's own grid) and `<song>.sf2` (a real
+  SoundFont 2 with the bank's instruments and its samples, so the same music can be
+  played or edited outside this tool).
+
+Where the ROM keeps several songs, the first one is converted and the window says
+how many there are. To choose:
+
+```
+chip8bit-cli.exe --cli --list-songs rom.nds
+chip8bit-cli.exe --cli rom.nds --sequence "BGM_BOSS" --stats
+chip8bit-cli.exe --cli rom.nds --sequence 12 --bank 3 --stats
+```
+
+`--sequence` takes a name fragment or a number; `--bank` overrides the bank the
+song asks for.
+
+**Nothing is bundled and nothing is downloaded.** Every byte written comes out of the
+file you opened; the project ships no game data.
+
+What carries across exactly: notes, timing, tempo, per-track volume, transpose,
+program changes, key ranges, root keys, pans, sample rates, loop points, and the
+sample data itself (8-bit, 16-bit and IMA ADPCM are all decoded — ADPCM is the
+common case in real banks, and it is read the way the hardware reads it: one state
+word for the sample, then nibbles low-first, with the size fields counting 4-byte
+words rather than samples).
+
+What does not: the DS envelope numbers (attack/decay/sustain/release use a curve of
+their own, so the SoundFont gets the samples and a short release instead), the PSG
+instruments some banks mix in (square/noise types, which have no sample behind them),
+and streamed music (`STRM`), which is not part of an SDAT. The converter itself does
+not need any of that: it re-composes the notes onto the NES's own voices, which is
+the whole point of the tool.
+
 ## What "understanding the MIDI" means here
 
 1. **Track names, tempo, time signature, key signature** are read from the file's
@@ -232,14 +278,20 @@ Samples are shipped as rendered audio, so there is no sample library to install 
 and no copyrighted sample data anywhere: the kit is maths.
 
 ## Honest limits
-## Honest limits
 
 * VGM can only address the NES APU and the SN76489, so `--export-vgm` leaves the
   VRC6/MMC5/FDS/N163 notes out of the log. The WAV always has all of them.
 * The delta channel here plays the built-in kit; it is not a sample player for
   arbitrary user samples yet.
-* Supported input: MIDI (`.mid .midi .rmi .kar`), VGM/VGZ, GYM, `.zip`. NSF, SPC and
-  PSF are different formats — the tool says so instead of guessing.
+* Supported input: MIDI (`.mid .midi .rmi .kar`), VGM/VGZ, GYM, Nintendo DS
+  (`.nds .sdat .sseq`), `.zip`. NSF, SPC, PSF and DS `STRM` streams are different
+  formats — the tool says so instead of guessing.
+* A DS ROM's SoundFont is as faithful as the bank allows: samples, key ranges, root
+  keys, pans, loops and rates are exact, the DS's own envelope curves are not
+  translated, and PSG-type instruments have no sample to export.
+* A DS sequence's randomised commands (`0xA0`, and anything else whose length
+  cannot be worked out from the command byte) end that track with a message in the
+  window rather than being guessed at — the notes before it are kept.
 * A dense orchestral MIDI will still lose inner voices: 22 monophonic voices is a
   hard ceiling, and the tool reports exactly what it dropped.
 

@@ -83,10 +83,50 @@ def _output_path(source: str, out_argument: str, extensions, suffix: str,
     return out_argument
 
 
+class _SourceChoice:
+    """The couple of things a DS ROM needs to know: which song, which bank."""
+
+    def __init__(self, sequence: str = "", bank: str = ""):
+        self.sequence = sequence or ""
+        self.bank = bank or ""
+
+
+def _song_list(importer, item: str):
+    """The songs of a DS file; anything else is simply not a song container."""
+    module = importers.module_of(importer)
+    lister = getattr(module, "songs", None) if module else None
+    if lister is None:
+        raise ValueError("only DS ROMs hold several songs")
+    return lister(item)
+
+
+def _list_songs(inputs) -> int:
+    """Print the songs a DS ROM holds, with the bank each one uses."""
+    found = False
+    for item in inputs:
+        try:
+            importer = importers.find_for(item)
+            songs = _song_list(importer, item)
+        except Exception as error:
+            print("%s: %s" % (item, error))
+            continue
+        found = True
+        print("%s - %d song%s" % (os.path.basename(item), len(songs),
+                                  "" if len(songs) == 1 else "s"))
+        for index, bank, name in songs:
+            print("  %3d  bank %2d  %s" % (index, bank, name))
+        print("  (pick one with --sequence NAME or --sequence NUMBER)")
+    if not found:
+        print("no DS ROM, SDAT or SSEQ found")
+        return 1
+    return 0
+
+
 def _convert(source: str, args, extensions, channels, multiple: bool = False) -> int:
     started = time.time()
-    importer = importers.find_for(source)
-    song = importer(source)
+    choice = _SourceChoice(getattr(args, "sequence", ""),
+                          getattr(args, "bank", ""))
+    song = importers.read_source(source, choice)
 
     for warning in song.warnings:
         print("  ! %s" % warning)
@@ -137,6 +177,13 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False) ->
     target = _output_path(source, args.output, extensions, ".wav", multiple)
     write_wav(target, pcm, render_options)
 
+    # A DS ROM gives up its own MIDI and SoundFont as well, so the same music can
+    # be played (or edited) outside this tool. They sit next to the .wav.
+    for extra in importers.extract_assets(
+            source, os.path.dirname(target) or ".",
+            os.path.splitext(os.path.basename(source))[0]):
+        print("  + %s" % extra)
+
     if args.export_vgm:
         vgm_target = os.path.splitext(target)[0] + ".vgm"
         for message in write_vgm(vgm_target, notes, channels, duration, extensions):
@@ -165,7 +212,8 @@ def main(argv=None) -> int:
         epilog=_extension_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("inputs", nargs="*", help="MIDI / VGM / VGZ / GYM files or folders")
+    parser.add_argument("inputs", nargs="*",
+                        help="MIDI / VGM / VGZ / GYM / NDS files or folders")
     parser.add_argument("-o", "--output", help="output file or folder")
     parser.add_argument("-e", "--extensions", default="",
                         help="extension chips to enable, comma separated: "
@@ -212,6 +260,13 @@ def main(argv=None) -> int:
     parser.add_argument("--transpose", type=int, default=0, help="semitones")
     parser.add_argument("--max-seconds", type=float, default=0.0,
                         help="stop after N seconds (0 = whole song)")
+    parser.add_argument("--sequence", default="",
+                        help="which song to take from a DS ROM (name or number)")
+    parser.add_argument("--bank", default="",
+                        help="which instrument bank of a DS ROM to use (default: "
+                             "the one the song asks for)")
+    parser.add_argument("--list-songs", action="store_true",
+                        help="list the songs inside a DS ROM and stop")
     parser.add_argument("--version", action="version", version="chip8bit %s" % VERSION)
 
     args = parser.parse_args(argv)
@@ -220,9 +275,12 @@ def main(argv=None) -> int:
         print(_extension_help())
         return 0
 
+    if args.list_songs:
+        return _list_songs(args.inputs)
+
     if not args.inputs:
         parser.print_help()
-        print("\nDrag a .mid, .vgm, .vgz or .gym file onto chip8bit.exe with")
+        print("\nDrag a .mid, .vgm, .vgz, .gym or .nds file onto chip8bit.exe with")
         print("--extensions all to convert it with every extension chip enabled.")
         _pause()
         return 0
@@ -233,7 +291,8 @@ def main(argv=None) -> int:
     sources = []
     for item in args.inputs:
         if os.path.isdir(item):
-            for pattern in ("*.mid", "*.midi", "*.vgm", "*.vgz", "*.gym", "*.zip"):
+            for pattern in ("*.mid", "*.midi", "*.vgm", "*.vgz", "*.gym",
+                            "*.nds", "*.sdat", "*.sseq", "*.zip"):
                 sources.extend(sorted(glob.glob(os.path.join(item, pattern))))
         else:
             sources.append(item)

@@ -118,7 +118,8 @@ class QueueItem:
         self.error = ""
 
 
-READABLE = (".mid", ".midi", ".rmi", ".kar", ".vgm", ".vgz", ".gym", ".zip")
+READABLE = (".mid", ".midi", ".rmi", ".kar", ".vgm", ".vgz", ".gym",
+            ".nds", ".sdat", ".sseq", ".zip")
 
 
 class App:
@@ -246,8 +247,8 @@ class App:
             self.status_error = False
             return
         if os.path.splitext(path)[1].lower() not in READABLE:
-            self.status = ("Can't read %s — MIDI, VGM, GYM or a .zip of those"
-                           % os.path.basename(path))
+            self.status = ("Can't read %s — MIDI, VGM, GYM, a DS ROM or a .zip "
+                           "of those" % os.path.basename(path))
             self.status_error = True
             return
         try:
@@ -401,6 +402,10 @@ class App:
                 self.pattern_column = 0
                 if result.ok:
                     self.status = "Saved %s" % os.path.basename(result.wav_path)
+                    if getattr(result, "assets", None):
+                        extras = sorted({os.path.splitext(name)[1].upper()
+                                         for name in result.assets})
+                        self.status += " + " + " and ".join(extras)
                     self.status_error = False
                 else:
                     self.status = "%s: %s" % (os.path.basename(path), result.error)
@@ -439,7 +444,16 @@ class App:
             self.status = ("Converted %d file%s in %.1fs to %s"
                            % (len(ok), "" if len(ok) == 1 else "s", took,
                               self.output_dir))
+            extras = self._written_extras()
+            if extras:
+                self.status += " — plus %s beside it" % " and ".join(extras)
             self.status_error = False
+
+    def _written_extras(self) -> List[str]:
+        """The .MID / .SF2 a DS ROM left next to the output, if any."""
+        newest = self.results[0] if self.results else None
+        names = getattr(newest, "assets", None) or []
+        return sorted({os.path.splitext(name)[1].upper() for name in names})
 
     # ---------------------------------------------------------------- playback
 
@@ -738,7 +752,7 @@ class App:
     def _found_lines(self):
         if not self.results:
             return ["No file analysed yet — add music, then press CONVERT",
-                    "drop .mid .vgm .vgz .gym .zip anywhere on this window",
+                    "drop .mid .vgm .vgz .gym .nds .sdat .zip anywhere on this window",
                     "", ""]
         result = self.results[min(self.selected_result, len(self.results) - 1)]
         if not result.ok:
@@ -1646,6 +1660,38 @@ def selftest(screenshot: Optional[str] = None) -> int:
         app.all_chips()
         check("ALL turns them back on", len(app.settings.extensions) == 6,
               str(len(app.settings.extensions)))
+
+        # --- a Nintendo DS ROM: queue it, convert it, and see the extras named
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "tests"))
+            import make_test_rom
+            rom = make_test_rom.write(os.path.join(tempfile.mkdtemp(), "gui.nds"))
+            app.add_path(rom)
+            check("a DS ROM can be queued", any(item.path == rom for item in app.items),
+                  str([item.name for item in app.items]))
+            app.settings.extensions = []
+            app.start_convert()
+            deadline = time.time() + 120
+            while app.busy and time.time() < deadline:
+                app._drain()
+                time.sleep(0.02)
+            app._drain()
+            check("a DS ROM converts in the window",
+                  bool(app.results) and app.results[0].ok,
+                  app.results[0].error if app.results else "no result")
+            check("the window says a MIDI and a SoundFont came out",
+                  "MID" in app.status and "SF2" in app.status, app.status)
+            app.draw()
+            check("the window still draws after a DS conversion", app.screen is not None)
+            if app.results and app.results[0].ok:
+                app.play(0)
+                check("the DS result plays like any other", app.playing is not None,
+                      str(app.playing))
+                app.stop()
+        except Exception as error:           # a broken window test must say why
+            check("a DS ROM converts in the window", False,
+                  "%s: %s" % (type(error).__name__, error))
 
         if screenshot:
             base, extension = os.path.splitext(screenshot)

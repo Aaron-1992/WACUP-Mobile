@@ -12,7 +12,9 @@ import subprocess
 import sys
 from typing import List, Optional
 
-FILTER = "Music files (*.mid;*.midi;*.rmi;*.kar;*.vgm;*.vgz;*.gym;*.zip)|*.mid;*.midi;*.rmi;*.kar;*.vgm;*.vgz;*.gym;*.zip|All files (*.*)|*.*|"
+FILTER = ("Music files (*.mid;*.midi;*.rmi;*.kar;*.vgm;*.vgz;*.gym;*.nds;*.sdat;*.sseq;*.zip)"
+          "|*.mid;*.midi;*.rmi;*.kar;*.vgm;*.vgz;*.gym;*.nds;*.sdat;*.sseq;*.zip"
+          "|All files (*.*)|*.*|")
 
 
 def _windows_owner():
@@ -154,7 +156,7 @@ def _posix_open() -> Optional[List[str]]:
     if result:
         return [line for line in result.splitlines() if line]
     result = _run(["kdialog", "--getopenfilename", os.path.expanduser("~"),
-                   "*.mid *.midi *.vgm *.vgz *.gym *.zip"])
+                   "*.mid *.midi *.vgm *.vgz *.gym *.nds *.sdat *.sseq *.zip"])
     return [result] if result else None
 
 

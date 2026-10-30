@@ -32,6 +32,8 @@ class Settings:
     echo: bool = False             # the NES "second pulse" delay, opt-in
     limit: bool = True             # peak limiting instead of turning everything down
     compress: bool = True          # gentle master compression
+    sequence: str = ""              # which song inside a bank archive (DS ROMs)
+    bank: str = ""                  # which instrument bank to take with it
 
     def channels(self):
         return chips.build_channel_set(
@@ -87,6 +89,7 @@ class Result:
     source_notes: int = 0
     render_seconds: float = 0.0
     stems: Dict[str, list] = field(default_factory=dict)   # per-channel audio, for checks
+    assets: List[str] = field(default_factory=list)        # MIDI/SoundFont written next to it
 
 
 def output_name(source: str, settings: Settings) -> str:
@@ -116,15 +119,27 @@ def convert_file(source: str, settings: Settings,
     result = Result(name=os.path.basename(source))
     report("Reading", 0.05)
 
+    target = output_path or os.path.join(os.path.dirname(os.path.abspath(source)),
+                                         output_name(source, settings))
+    directory = os.path.dirname(target)
+    stem = os.path.splitext(os.path.basename(source))[0]
+
     try:
-        importer = importers.find_for(source)
-        song = importer(source)
+        song = importers.read_source(source, settings)
     except Exception as error:
         result.ok = False
         result.error = "%s: %s" % (type(error).__name__, error)
         return result
 
     result.warnings = list(song.warnings)
+
+    # A source that carries its own instruments (a DS ROM) also hands over the
+    # MIDI and SoundFont it was described by, so the same music can be played
+    # anywhere. Nothing is bundled: these come from the file that was opened.
+    try:
+        result.assets = importers.extract_assets(source, directory, stem)
+    except Exception as error:
+        result.warnings.append("could not write the source MIDI/SoundFont: %s" % error)
     result.source_format = song.source_format
     result.source_notes = len(song.notes)
     if not song.notes:
@@ -157,9 +172,6 @@ def convert_file(source: str, settings: Settings,
     report("Writing the WAV", 0.9)
     audio = wav_bytes(pcm, render_options)
 
-    target = output_path or os.path.join(os.path.dirname(os.path.abspath(source)),
-                                         output_name(source, settings))
-    directory = os.path.dirname(target)
     if directory:
         os.makedirs(directory, exist_ok=True)
 
