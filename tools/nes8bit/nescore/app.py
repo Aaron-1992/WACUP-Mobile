@@ -802,10 +802,15 @@ class App:
                     self.running = False
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self.mouse = event.pos
-            for rect, action in reversed(self.hits):
-                if rect.collidepoint(event.pos):
-                    action()
-                    break
+            # The click goes to the *smallest* control under the pointer, so a
+            # button always beats the panel it sits on, whatever order they
+            # happened to be drawn in. That was a real bug once: a panel-wide
+            # "click empty space" rectangle drew last and ate every button in it.
+            under = [hit for hit in self.hits if hit[0].collidepoint(event.pos)]
+            if under:
+                rect, action = min(under, key=lambda hit: hit[0].width *
+                                   hit[0].height)
+                action()
 
     def _song_window_key(self, event) -> None:
         """Keys while the song browser is open: pick, use, or leave."""
@@ -2162,12 +2167,13 @@ def selftest(screenshot: Optional[str] = None) -> int:
         app.draw()
         hidden: List[str] = []
         for rect, action in app.hits:
-            for other_rect, other_action in reversed(app.hits):
-                if not other_rect.collidepoint(rect.center):
-                    continue
-                if other_action is not action:
-                    hidden.append("%s under %s" % (action, other_action))
-                break
+            under = [hit for hit in app.hits
+                     if hit[0].collidepoint(rect.center)]
+            if not under:
+                continue
+            winner = min(under, key=lambda hit: hit[0].width * hit[0].height)
+            if winner[1] is not action:
+                hidden.append("%s loses to %s" % (action, winner[1]))
         return hidden
 
     try:
