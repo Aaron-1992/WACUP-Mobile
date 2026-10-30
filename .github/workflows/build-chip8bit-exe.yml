@@ -44,12 +44,14 @@ jobs:
           python chip8bit.py --cli tests/genesis-style.mid --extensions all --stats
           python chip8bit.py --cli tests/genesis-style.mid
           # asset names on a release must stay boring: no spaces or brackets
-          cp "tests/genesis-style [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-all-chips.wav
+          cp "tests/genesis-style [nes+dual+pce+vrc6+mmc5+fds+n163+psg+dmc].wav" \
+             demo/demo-all-chips.wav
           cp "tests/genesis-style [nes].wav" demo/demo-bare-nes.wav
           # a fast one: 226 BPM sixteenths, which used to be dropped as "too short"
           python -c "from nescore.demo import write_fast; write_fast('tests/fast-tune.mid')"
           python chip8bit.py --cli tests/fast-tune.mid --extensions all
-          cp "tests/fast-tune [nes+vrc6+mmc5+fds+n163+psg+dmc].wav" demo/demo-fast-tune.wav
+          cp "tests/fast-tune [nes+dual+pce+vrc6+mmc5+fds+n163+psg+dmc].wav" \
+             demo/demo-fast-tune.wav
           # and the same tune on the two whole consoles, in stereo, because that
           # is the one render you can only hear with a second APU and a PC Engine
           python chip8bit.py --cli tests/genesis-style.mid --extensions dual,pce --stereo
