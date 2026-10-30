@@ -238,6 +238,16 @@ jobs:
             squares, and a line with a real timbre gets those channels first. Both
             go into the VGM log too (dual-APU bit and the HuC6280 command).
 
+            **One note per voice, always.** A chip channel is monophonic, so the
+            arranger now keeps every placed note in a sorted interval list and asks
+            it directly whether a channel is busy at a given moment. Two notes can
+            therefore never land on one voice — not a chord on top of a bar of
+            melody, and not a note placed for a moment *before* one already placed
+            (which is exactly what used to happen, and what made a conversion sound
+            like it was "sharing channels"). A kick also no longer swallows the bass
+            note on its own MIDI pitch, and the triangle stays with the bass line
+            instead of being taken by a chord tone for half a beat.
+
             Sound: drums are real samples through the delta channel, every note has
             an attack/release so nothing clicks, and the mix is balanced by role —
             melody on top, bass under it, the chord bed underneath, drums in front

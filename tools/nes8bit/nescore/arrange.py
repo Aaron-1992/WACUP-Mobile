@@ -13,6 +13,7 @@ The rules are the ones an NES composer uses by hand:
   how NES soundtracks fake chords.
 """
 
+import bisect
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -50,15 +51,23 @@ RICH_FAMILIES = {"piano", "chromatic", "organ", "guitar", "strings", "ensemble",
                  "brass", "reed", "pipe", "ethnic", "pad"}
 
 
-def _wanted_kinds(note: Note, role: str, has_huc: bool) -> List[str]:
+def _wanted_kinds(note: Note, role: str, has_huc: bool,
+                  has_bass: bool = True) -> List[str]:
     """Which channel kinds suit this note, best first.
 
     With no PC Engine in the console this is the fixed table it always was, so a
     plain NES render is unchanged. With one, a line whose instrument has a real
     timbre (flute, strings, organ, brass…) is offered the wave-RAM channels
     first; a square-wave lead, a bass and the drums keep the order they had.
+
+    The triangle is the bass voice: it has no volume register and a fixed, hollow
+    tone, which is why it is last for every other part. If the song has a bass
+    line at all, only the bass may use it — otherwise a chord tone takes the
+    triangle for half a beat and the bass note underneath disappears.
     """
     order = ROLE_PREFERENCE.get(role) or ROLE_PREFERENCE["harmony"]
+    if has_bass and role != "bass" and "triangle" in order:
+        order = [kind for kind in order if kind != "triangle"]
     if not has_huc or "huc" not in order:
         return order
     if role == "bass":
@@ -347,21 +356,54 @@ _UNPLAYABLE = 0.006
 
 
 class _ChannelState:
-    """Notes currently sounding on one channel, used for overlap checks."""
+    """Everything one channel has been given, and what is sounding when.
+
+    A chip channel is monophonic: one note at a time, full stop. So the arranger
+    has to be able to answer "is this channel busy between these two moments?"
+    exactly, for *any* two moments — the parts are placed in priority order, not
+    in time order (all the drums, then the tune, then the harmony), which means a
+    note is often placed at a time earlier than the one before it.
+
+    This used to be a list pruned against the current note's start, which quietly
+    threw away notes that were still to come: a bar of melody placed first, then a
+    two-second chord placed "before" it, and the chord landed on top of the melody
+    and cut it off. That is what channel sharing sounds like when it is not
+    supposed to be happening. The list is kept sorted by start instead, and notes
+    are never forgotten, so an overlap can never be invented.
+    """
 
     def __init__(self, spec: ChannelSpec):
         self.spec = spec
         self.active: List[dict] = []      # {"note": Note, "cluster": _Cluster|None}
+        self._spans: List[dict] = []      # the same entries, sorted by note.start
+        self._starts: List[float] = []    # note.start of each entry, ascending
+        self._longest = 0.0               # the longest note here so far
         self.used = False
 
-    def prune(self, now: float) -> None:
-        self.active = [entry for entry in self.active
-                       if entry["note"].end() > now - 0.001]
+    def add(self, entry: dict) -> None:
+        note = entry["note"]
+        index = bisect.bisect_right(self._starts, note.start)
+        self._starts.insert(index, note.start)
+        self._spans.insert(index, entry)
+        self.active.append(entry)
+        self._longest = max(self._longest, note.dur)
+        self.used = True
 
     def conflicts(self, start: float, end: float) -> List[dict]:
-        return [entry for entry in self.active
-                if entry["note"].start < end - 0.001
-                and entry["note"].end() > start + 0.001]
+        """The notes that would be sounding at the same time as [start, end)."""
+        found: List[dict] = []
+        index = bisect.bisect_left(self._starts, end)
+        # nothing that begins earlier than ``start`` minus the longest note on
+        # this channel can still be sounding, so the scan stops there
+        floor = start - self._longest
+        while index > 0:
+            index -= 1
+            if self._starts[index] <= floor:
+                break
+            note = self._spans[index]["note"]
+            if note.end() > start + 0.001:
+                found.append(self._spans[index])
+        return found
 
     def free_at(self, start: float, end: float) -> bool:
         return not self.conflicts(start, end)
@@ -401,6 +443,8 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     if budget:
         source_notes = _thin_voices(source_notes, budget, stats)
     share_budget = int(len(source_notes) * max(0.0, options.share_budget))
+    # a song with a bass line keeps the triangle for it (see _wanted_kinds)
+    has_bass = any(note.role == "bass" for note in source_notes)
 
     # Three passes, most important music first. A harmony note can only take what
     # is still free after the melody, the bass and the drums have been placed, so
@@ -431,11 +475,8 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
         if options.transpose:
             note.pitch = max(0, min(127, note.pitch + options.transpose))
 
-        for state in states.values():
-            state.prune(note.start)
-
         role = note.role if note.role in ROLE_PREFERENCE else "harmony"
-        wanted_kinds = _wanted_kinds(note, role, has_huc)
+        wanted_kinds = _wanted_kinds(note, role, has_huc, has_bass)
 
         drum = note.role == "drum"
         if drum:
@@ -544,8 +585,7 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
         if drum:
             note.volume = max(6, note.volume)
         _apply_envelope(note, chosen.spec)
-        chosen.active.append({"note": note, "cluster": None})
-        chosen.used = True
+        chosen.add({"note": note, "cluster": None})
         placed.append(note)
 
     # Turn every cluster into a fast arpeggio: the pitches take turns.
@@ -554,7 +594,7 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
     notes_out = [n for n in placed if not _in_cluster(n, clusters)] + arpeggiated
 
     if options.quantize and options.fps > 0:
-        notes_out = _quantize(notes_out, options.fps)
+        notes_out = _quantize(notes_out, options.fps, stats)
 
     notes_out.sort(key=lambda n: (n.start, n.pitch))
     stats.clusters = len(clusters)
@@ -635,7 +675,11 @@ def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
     """
     buckets: Dict[tuple, List[Note]] = {}
     for note in notes:
-        key = (note.pitch, int(round(note.start / 0.01)))
+        # percussion lives on its own pitch numbers, and MIDI 36 is both the kick
+        # drum and a perfectly ordinary bass note: folding them together deleted
+        # the bass line whenever the kick landed on it. Two drum hits are two
+        # hits as well — a hat 10 ms after another hat is a roll, not a doubling.
+        key = (note.role == "drum", note.pitch, int(round(note.start / 0.01)))
         buckets.setdefault(key, []).append(note)
 
     kept: List[Note] = []
@@ -644,10 +688,12 @@ def _dedupe(notes: List[Note], stats: Stats) -> List[Note]:
         winners: List[Note] = []
         for note in group:
             host = None
+            # a doubled part starts on the same tick; a drum roll does not
+            window = 0.006 if note.role == "drum" else 0.03
             for candidate in winners:
                 overlap = min(note.end(), candidate.end()) - \
                     max(note.start, candidate.start)
-                if overlap > 0.002 and abs(note.start - candidate.start) < 0.03:
+                if overlap > 0.002 and abs(note.start - candidate.start) < window:
                     host = candidate
                     break
             if host is None:
@@ -672,8 +718,11 @@ def _steal_for_drum(note: Note, by_kind):
     best = None
     for kind in ("noise", "dmc"):
         for state in by_kind.get(kind, []):
-            active = [entry for entry in state.active
-                      if entry["cluster"] is None and entry["note"].end() > note.start]
+            # only what is *sounding* under this hit, never a note that has not
+            # started yet: shortening one of those leaves a 20 ms blip where a
+            # whole phrase used to be
+            active = [entry for entry in state.conflicts(note.start, note.end())
+                      if entry["cluster"] is None]
             if not active:
                 continue
             weakest = min(active, key=lambda entry: _DRUM_RANK.get(entry["note"].drum, 3))
@@ -691,9 +740,8 @@ def _steal_for_drum(note: Note, by_kind):
         for state in by_kind.get("huc", []):
             if not state.spec.noise_capable:
                 continue
-            active = [entry for entry in state.active
+            active = [entry for entry in state.conflicts(note.start, note.end())
                       if entry["cluster"] is None
-                      and entry["note"].end() > note.start
                       and entry["note"].role in ("harmony", "counter", "rhythm")]
             if active:
                 options.append((len(active), state, active))
@@ -706,8 +754,9 @@ def _steal_for_drum(note: Note, by_kind):
     for entry in active:
         other = entry["note"]
         if other.end() > note.start:
+            # the hit wins the channel from here on, but the line keeps every
+            # note it had before this moment
             other.dur = max(0.02, note.start - other.start)
-    state.prune(note.start)
     return state
 
 
@@ -764,7 +813,7 @@ def _try_share(note: Note, by_kind, wanted_kinds, options: Options,
         clusters.append(cluster)
 
     cluster.add(note)
-    state.active.append({"note": note, "cluster": cluster})
+    state.add({"note": note, "cluster": cluster})
     return cluster
 
 
@@ -843,9 +892,41 @@ def _expand_clusters(clusters: List[_Cluster], states: Dict[str, _ChannelState],
     return out
 
 
-def _quantize(notes: List[Note], fps: float) -> List[Note]:
+def _quantize(notes: List[Note], fps: float, stats: Optional[Stats] = None) -> List[Note]:
+    """Snap the arrangement to the console's frame grid — without stacking notes.
+
+    A chip is driven once a frame, so everything lands on a frame boundary. The
+    catch is that rounding a note's *length* up can push its end past the start of
+    the next note on that channel: the two then fight for one voice and the first
+    one is cut off in the middle. Lengths are therefore clipped to the gap that is
+    actually there, and a note that would be squeezed under a frame is left out
+    rather than turned into a click.
+    """
     frame = 1.0 / fps
+    by_channel: Dict[str, List[Note]] = {}
     for note in notes:
         note.start = round(note.start / frame) * frame
         note.dur = max(frame, round(note.dur / frame) * frame)
-    return notes
+        by_channel.setdefault(note.channel, []).append(note)
+
+    keep: List[Note] = []
+    for _channel, line in by_channel.items():
+        line.sort(key=lambda n: n.start)
+        for index, note in enumerate(line):
+            limit = None
+            if index + 1 < len(line):
+                limit = line[index + 1].start - note.start
+            if limit is None or note.dur <= limit - 1e-9:
+                keep.append(note)
+                continue
+            if limit < frame * 0.5:
+                # the next note starts on this very frame: one note, not a click
+                if stats is not None:
+                    stats.simplified += 1
+                    stats.left_out[note.role] = stats.left_out.get(note.role, 0) + 1
+                continue
+            # hold right up to the next note, like a legato join, and stop a
+            # millisecond short so the two never fight for the voice
+            note.dur = max(frame, limit - 0.001)
+            keep.append(note)
+    return keep

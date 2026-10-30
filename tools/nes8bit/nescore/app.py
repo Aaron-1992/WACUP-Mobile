@@ -2342,6 +2342,9 @@ def selftest(screenshot: Optional[str] = None) -> int:
                   str(len(pattern[1])))
             check("pattern grid has rows", pattern[3] > 8, str(pattern[3]))
             check("pattern grid has notes", bool(pattern[4]), str(len(pattern[4])))
+            stacked = sum(len(cell) - 1 for cell in pattern[4].values())
+            check("the pattern puts one note in a cell, never two",
+                  stacked == 0, "%d notes stacked" % stacked)
             check("notes left out are reported",
                   isinstance(getattr(result, "left_out", None), int),
                   str(getattr(result, "left_out", None)))

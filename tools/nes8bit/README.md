@@ -297,8 +297,14 @@ the whole point of the tool.
 
 ## How the placement rules work
 
-A chip channel plays **one note at a time**. Anything else is a lie that sounds
-like one, so:
+A chip channel plays **one note at a time**. That is a guarantee, not an
+intention: the arranger keeps every placed note in a sorted interval list and asks
+it directly whether a channel is busy at a given moment, so two notes can never
+end up on one voice — not because a chord met a melody, and not because a note was
+placed for a moment *before* one that had already been placed. (It used to prune
+that bookkeeping against the current note's start, which quietly let a long chord
+land on top of a bar of melody that was already there. That is what "it shares
+channels and sounds bad" was.) The rules:
 
 1. each part is classified (melody / harmony / bass / drums);
 2. channels are handed out in **three passes**: melody, bass and drums first — the
@@ -312,43 +318,57 @@ like one, so:
 4. a note that finds nothing free is first put on **any other free voice** that
    can plausibly play it;
 5. percussion may **take a channel from a hi-hat** — a missing backbeat is worse
-   than a clipped hat, and that is what real NES drum code does;
-6. parts that duplicate each other note for note are folded into one;
-7. every line keeps **its own channel** once it has one, so a chord sounds like a
+   than a clipped hat, and that is what real NES drum code does. It only ever
+   shortens a note that is *sounding* under the hit, never one that has not
+   started yet;
+6. parts that duplicate each other note for note are folded into one — but a drum
+   hit is never folded into a pitched note (MIDI 36 is both the kick and a normal
+   bass note, and folding those two together deleted the bass line under every
+   kick) and two drum hits are never folded into one;
+7. the triangle is the bass voice: if the song has a bass line, no other part may
+   use it, or a chord tone takes it for half a beat and the bass note underneath
+   disappears;
+8. every line keeps **its own channel** once it has one, so a chord sounds like a
    chord and the part does not jump between voices;
-8. with extension chips on, at most a **handful of separate lines** play at once
+9. with extension chips on, at most a **handful of separate lines** play at once
    (one melody, one rhythm, a few counter-melodies, the strongest chord voices).
    A full-band MIDI export has five guitar parts and eleven harmony lines; that is
    not an arrangement, it is mud, so the strongest lines are kept and the rest are
    reported as thinned;
-9. a note outside what its voice can physically play (below A1 on a pulse, above
+10. a note outside what its voice can physically play (below A1 on a pulse, above
    C7) is **moved by whole octaves** into range instead of being rendered as a
    click or dropped — the same thing a chip composer does by hand, counted in the
    stats as "octave-folded";
-10. anything left over is **dropped and counted**, not smuggled in — there is no
+11. anything left over is **dropped and counted**, not smuggled in — there is no
    arpeggio cramming. The header and the result card say exactly how many notes
    were left out or thinned, and where they came from.
 
 Measured on the generated 226 BPM stand-in for the athletic-theme case the tests
-use (360 notes, 8 seconds — small, but it is the shape of a real game tune):
+use (384 notes, 8 seconds — small, but it is the shape of a real game tune: a lead,
+a chord bed, a counter line, a bass and a busy kit):
 
 | chips | voices available | notes kept | left out | lines thinned |
 | --- | --- | --- | --- | --- |
-| bare NES | 4 | 327 | 33 | – |
-| second APU alone (`--no-nes --extensions dual`) | 4 | 327 | 33 | – |
-| PC Engine alone (`--no-nes --extensions pce`) | 6 | 359 | 1 | – |
-| + VRC6 | 7 | 336 | 24 | – |
-| + 2× NES | 8 | 344 | 0 | 1 |
-| + PC Engine | 10 | 344 | 0 | 1 |
-| everything | 32 | 360 | 0 | 0 |
+| bare NES | 4 | 264 | 99 | – |
+| second APU alone (`--no-nes --extensions dual`) | 4 | 264 | 99 | – |
+| PC Engine alone (`--no-nes --extensions pce`) | 6 | 312 | 51 | – |
+| + VRC6 | 7 | 333 | 30 | – |
+| + 2× NES | 8 | 347 | 0 | 1 |
+| + PC Engine | 10 | 347 | 0 | 1 |
+| everything | 32 | 363 | 0 | 0 |
 
 (The "lines thinned" budget only switches on from eight voices up — with four or
 six voices there is not enough room for mud, so channel contention alone decides
 and nothing is thrown away on purpose.)
 
-On the built-in demo tune (169 notes): bare NES keeps 121 (34 left out: 24 drum,
-10 harmony), all chips keep 146 and thin one spare line. Nothing is ever dropped for
-being "too short" any more.
+On a bare NES that tune keeps the lead (96 notes), the counter line (48), the bass
+(24) and the kit (96); the chord bed is what goes, because four voices cannot hold
+five parts. Every one of those 99 left-out notes is a note the console had no voice
+for at that moment — none of them is silently stacked on top of another one.
+
+On the built-in demo tune (169 notes): bare NES keeps 105 (53 left out: 24 drum,
+10 counter, 19 harmony), all chips keep 158. Nothing is ever dropped for being "too
+short" any more.
 
 `--stats` (and the result card) tells you the exact count of each outcome, including
 which lines were thinned and why.

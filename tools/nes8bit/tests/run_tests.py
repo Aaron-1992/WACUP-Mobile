@@ -303,6 +303,75 @@ def main_test() -> None:
     check("switching everything off is refused with a reason, not a crash",
           not silent.ok and "no chip" in silent.error.lower(), silent.error)
 
+    print("one voice at a time (a channel is monophonic, always)")
+    band_path = _write_band_midi(os.path.join(work, "band.mid"))
+    band_song = importers.find_for(band_path)(band_path)
+    band_analysis = analyze.analyse(band_song)
+    check("the band tune parsed", len(band_song.notes) > 180,
+          str(len(band_song.notes)))
+    band_configs = (("bare NES", [], True), ("2x NES", ["dual"], True),
+                    ("PC Engine plus a NES", ["pce"], True),
+                    ("PC Engine alone", ["pce"], False),
+                    ("everything", list(chips.EXTENSION_CHANNELS), True))
+    for label, extensions, base in band_configs:
+        channel_set = chips.build_channel_set(extensions, base=base)
+        band_notes, band_stats = arrange(band_song, channel_set, Options(),
+                                         analysis=band_analysis)
+        placed: dict = {}
+        for note in band_notes:
+            placed.setdefault(note.channel, []).append(note)
+        collisions = []
+        for channel_id, line in placed.items():
+            line.sort(key=lambda n: n.start)
+            for first, second in zip(line, line[1:]):
+                if second.start < first.start + first.dur - 1e-4:
+                    collisions.append((channel_id, round(first.start, 3),
+                                       round(second.start, 3)))
+        check("%s never puts two notes on one voice" % label,
+              not collisions, str(collisions[:3]))
+        unaccounted = (len(band_song.notes) - len(band_notes)
+                       - band_stats.dropped - band_stats.simplified
+                       - band_stats.deduped - sum(band_stats.thinned.values()))
+        check("%s accounts for every note in the file" % label,
+              unaccounted == 0, "%d notes unaccounted for" % unaccounted)
+        used = {note.channel for note in band_notes}
+        check("%s only writes to channels it has" % label,
+              used <= {spec.id for spec in channel_set},
+              str(used - {spec.id for spec in channel_set}))
+
+    print("unisons: what may be folded and what may not")
+    kick = Note(start=0.0, dur=0.05, pitch=36, role="drum", part=1, voice=1,
+                drum="kick")
+    bass_note = Note(start=0.0, dur=0.45, pitch=36, role="bass", part=2, voice=2)
+    folded = arrange_module._dedupe([kick, bass_note], arrange_module.Stats())
+    check("a kick does not eat the bass note on its own pitch",
+          len(folded) == 2, "folded to %d notes" % len(folded))
+    doubled = Note(start=0.0, dur=2.0, pitch=60, role="harmony", part=3, voice=3)
+    copy_note = Note(start=0.0, dur=2.0, pitch=60, role="harmony", part=4, voice=4)
+    folded = arrange_module._dedupe([doubled, copy_note], arrange_module.Stats())
+    check("two parts playing one unison note become one",
+          len(folded) == 1, "kept %d" % len(folded))
+    first_hat = Note(start=0.0, dur=0.03, pitch=42, role="drum", part=1, voice=1,
+                     drum="hat")
+    next_hat = Note(start=0.01, dur=0.03, pitch=42, role="drum", part=1, voice=1,
+                    drum="hat")
+    folded = arrange_module._dedupe([first_hat, next_hat], arrange_module.Stats())
+    check("a drum roll is not a doubled part", len(folded) == 2,
+          "folded to %d hits" % len(folded))
+
+    print("the triangle belongs to the bass")
+    triangle_set = chips.build_channel_set([], base=True)
+    triangle_notes, _ = arrange(band_song, triangle_set, Options(),
+                                analysis=band_analysis)
+    on_triangle = [n for n in triangle_notes if n.channel == "triangle"]
+    check("nothing but the bass plays the triangle",
+          on_triangle and all(n.role == "bass" for n in on_triangle),
+          str(sorted({n.role for n in on_triangle})))
+    source_bass = [n for n in band_song.notes if n.role == "bass"]
+    check("and every bass note lands there",
+          sum(1 for n in on_triangle) == len(source_bass),
+          "%d of %d" % (sum(1 for n in on_triangle), len(source_bass)))
+
     print("octave folding (a chip has a range, not every pitch)")
     extremes = Song(notes=[Note(start=0.0, dur=0.4, pitch=16, velocity=100,
                                 part=1),
@@ -946,6 +1015,72 @@ def main_test() -> None:
 
     print("\n%d check(s) failed" % len(FAILURES))
     return 0 if not FAILURES else 1
+
+
+def _write_band_midi(path: str) -> str:
+    """A band-shaped tune: lead, triads, bass, a busy kit, a counter line.
+
+    The generated demo in ``nescore.demo`` is deliberately four bars long; this
+    one is here so the arranger is tested against parts that fight for the same
+    channel: a four-note chord, a bass note on the kick's own pitch (MIDI 36),
+    eighth-note hats, and a counter melody that would happily take the triangle.
+    """
+    from nescore.demo import Track
+
+    division = 480
+    beat = division
+    bar = beat * 4
+    tracks = []
+
+    lead = Track("lead")
+    lead.program(0, 73)
+    for index in range(64):
+        lead.note(0, index * beat // 2, beat // 2 - 12,
+                  [72, 74, 76, 79, 81, 79, 76, 74][index % 8], 100)
+    tracks.append(lead)
+
+    chords = Track("chords")
+    chords.program(1, 48)
+    for number, triad in enumerate(((48, 52, 55, 60), (45, 48, 52, 57),
+                                    (41, 45, 48, 53), (43, 47, 50, 55))):
+        for pitch in triad:
+            chords.note(1, number * bar, bar - 30, pitch, 80)
+    tracks.append(chords)
+
+    bass = Track("bass")
+    bass.program(2, 33)
+    for number, root in enumerate((36, 33, 29, 31)):
+        for step in range(8):
+            bass.note(2, number * bar + step * beat // 2, beat // 2 - 15,
+                      root + (12 if step % 4 == 3 else 0), 105)
+    tracks.append(bass)
+
+    drums = Track("drums")
+    drums.program(9, 0)
+    for number in range(4):
+        for step in range(8):
+            tick = number * bar + step * beat // 2
+            drums.note(9, tick, 60, 42, 70)                 # closed hat
+            if step % 4 == 0:
+                drums.note(9, tick, 90, 36, 110)            # kick
+            if step % 4 == 2:
+                drums.note(9, tick, 90, 38, 105)            # snare
+    tracks.append(drums)
+
+    counter = Track("counter")
+    counter.program(3, 68)
+    for index in range(32):
+        counter.note(3, index * beat // 2, beat // 2 - 30,
+                     [64, 67, 71, 72][index % 4], 78)
+    tracks.append(counter)
+
+    header = b"MThd" + struct.pack(">IHHH", 6, 0, len(tracks) + 1, division)
+    tempo = Track("tempo")
+    tempo.add(0, bytes([0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20]))
+    body = header + tempo.serialize() + b"".join(t.serialize() for t in tracks)
+    with open(path, "wb") as handle:
+        handle.write(body)
+    return path
 
 
 def _simultaneity(notes) -> float:
