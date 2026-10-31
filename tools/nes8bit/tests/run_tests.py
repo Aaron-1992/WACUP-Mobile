@@ -3,6 +3,7 @@
 Run with:  python tests/run_tests.py
 """
 
+import array
 import contextlib
 import io
 import math
@@ -1334,33 +1335,49 @@ def recognition_test() -> None:
         return analyze.analyse(song)
 
     def _samples(rendered):
-        """The render's audio as one channel of floats — measurements need that."""
-        import numpy
-        data = numpy.frombuffer(rendered.pcm, dtype="<i2").astype(float)
-        if rendered.channels == 2:
-            data = data.reshape(-1, 2).mean(axis=1)
-        return data
+        """The render's audio as one channel of ints — measurements need that.
+
+        No numpy here on purpose: the converter is standard library only, and a
+        check that needs a package the tool does not use proves nothing about the
+        tool that ships.
+        """
+        data = array.array("h")
+        data.frombytes(rendered.pcm)
+        if sys.byteorder == "big":
+            data.byteswap()
+        return data[0::2] if rendered.channels == 2 else data
 
     def _dominant_hz(rendered):
-        """The strongest frequency of a rendered note, measured, not assumed."""
-        import numpy
+        """The measured pitch: one period, from the rising zero crossings.
+
+        Counting the crossings and interpolating each one gives the average period
+        across a quarter of a second, which is enough to tell a note at its recorded
+        pitch from one a semitone out.
+        """
         data = _samples(rendered)
         start = int(0.15 * rendered.rate)
-        window = data[start:start + 16384]
-        if not len(window):
+        window = [float(value) for value in data[start:start + 8192]]
+        if len(window) < 64:
             return 0.0
-        spectrum = numpy.abs(numpy.fft.rfft(window * numpy.hanning(len(window))))
-        freqs = numpy.fft.rfftfreq(len(window), 1.0 / rendered.rate)
-        return float(freqs[int(numpy.argmax(spectrum))])
+        mean = sum(window) / len(window)
+        crossings = []
+        for index in range(1, len(window)):
+            before, now = window[index - 1] - mean, window[index] - mean
+            if before <= 0.0 < now:
+                span = now - before
+                crossings.append(index - 1 + (-before / span if span else 0.0))
+        if len(crossings) < 2:
+            return 0.0
+        return rendered.rate * (len(crossings) - 1) / (crossings[-1] - crossings[0])
 
     def _loudness(rendered, at_seconds):
-        import numpy
+        """RMS of a 23 ms window, 0..1 — "is it still playing there?"."""
         data = _samples(rendered)
         start = int(at_seconds * rendered.rate)
-        window = data[start:start + 1024]
-        if not len(window):
+        window = list(data[start:start + 1024])
+        if not window:
             return 0.0
-        return float(numpy.sqrt((window ** 2).mean())) / 32768.0
+        return (sum(value * value for value in window) / len(window)) ** 0.5 / 32768.0
 
     work = tempfile.mkdtemp(prefix="chip8bit-recog-")
     print("finding the songs in a ROM with two sound archives")
@@ -1437,17 +1454,23 @@ def recognition_test() -> None:
     check("a note at its recorded pitch plays at its recorded rate",
           abs(_dominant_hz(tone) - 500.0) < 6.0,
           "%.1f Hz (expected 500)" % _dominant_hz(tone))
-    # an octave up is exactly twice the pitch — this is what "the wrong key"
-    # would look like if the resampling were sloppy
-    octave_rom = rom_tools.build_tone_rom(os.path.join(work, "octave.nds"),
-                                          root=60, pitch=72, rate=16000)
-    octave_archive, _title = nds.open_archive(octave_rom)
-    octave = sampled.render_song(
-        nds.read_sequence(octave_archive.find_sequence("TONE").sseq),
-        octave_archive, 0, sampled.SampleOptions(rate=32768, stereo=True))
-    check("an octave above is twice the frequency",
-          abs(_dominant_hz(octave) - 1000.0) < 12.0,
-          "%.1f Hz (expected 1000)" % _dominant_hz(octave))
+    # the same sample played an octave down, an octave up and two octaves up:
+    # this is what "the wrong key" would look like if the resampling were sloppy
+    measured = {}
+    for pitch, expected, words in ((48, 250.0, "an octave down"),
+                                   (72, 1000.0, "an octave up"),
+                                   (84, 2000.0, "two octaves up")):
+        transposed = rom_tools.build_tone_rom(
+            os.path.join(work, "pitch-%d.nds" % pitch), root=60, pitch=pitch,
+            rate=16000)
+        transposed_archive, _title = nds.open_archive(transposed)
+        rendered = sampled.render_song(
+            nds.read_sequence(transposed_archive.find_sequence("TONE").sseq),
+            transposed_archive, 0, sampled.SampleOptions(rate=32768, stereo=True))
+        measured[pitch] = _dominant_hz(rendered)
+        check("the same sample %s plays at %.1f Hz" % (words, expected),
+              abs(measured[pitch] - expected) < expected * 0.002,
+              "%.2f Hz (expected %.1f)" % (measured[pitch], expected))
     check("the note sustains for its whole length, not just its attack",
           _loudness(tone, 0.2) > 0.4 * _loudness(tone, 0.01),
           "%.3f at 0.2 s vs %.3f at 0.01 s" % (_loudness(tone, 0.2),
