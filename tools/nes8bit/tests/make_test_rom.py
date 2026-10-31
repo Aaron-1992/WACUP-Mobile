@@ -32,13 +32,19 @@ def _vlq(value: int) -> bytes:
     return bytes(out)
 
 
-def build_sseq(program_value=None, extra_melody: bytes = b"") -> bytes:
+def build_sseq(program_value=None, extra_melody: bytes = b"",
+               head: bytes = b"", head_tempo: int = 0) -> bytes:
     """Three tracks: tempo/track list, a melody with a program change and a
     transpose, and a bass — plus a loop, which the reader must not follow.
 
     ``program_value`` writes the program change as a raw variable-length value
     (the bank lives in its high bits); ``extra_melody`` slips more commands into
     the melody, which is how the tests check the command table.
+
+    ``head`` puts commands *between* the track table and the first track — which
+    is where Nintendo's own sequences keep the tempo. Nothing names that region
+    as a track, so a reader that only walks tracks (this one, until it was fixed)
+    plays every song at the default 120 BPM.
     """
     # Assembled in two passes because the track offsets are absolute.
     header_size = 0x1C
@@ -68,13 +74,17 @@ def build_sseq(program_value=None, extra_melody: bytes = b"") -> bytes:
 
     tempo_and_tracks = bytearray()
     tempo_and_tracks += bytes([0xFE, 0x07, 0x00])      # all three tracks play
-    tempo_and_tracks += bytes([0xE1]) + struct.pack("<H", 150)
+    if head_tempo:
+        # the tempo lives in the head, the way Nintendo's own sequences write it
+        head = bytes([0xE1]) + struct.pack("<H", head_tempo) + head
+    else:
+        tempo_and_tracks += bytes([0xE1]) + struct.pack("<H", 150)
     tempo_and_tracks += bytes([0xFF])
 
     # layout: [definitions][tempo track][melody][bass]. Track offsets are
     # relative to the start of the sequence DATA block, not to the file.
     definitions = bytearray()
-    tempo_offset = 3 * 5                       # three 0x93 definitions
+    tempo_offset = 3 * 5 + len(head)           # three 0x93 definitions, then head
     melody_offset = tempo_offset + len(tempo_and_tracks)
     bass_offset = melody_offset + len(melody)
     for number, offset in ((0, tempo_offset), (1, melody_offset),
@@ -82,7 +92,7 @@ def build_sseq(program_value=None, extra_melody: bytes = b"") -> bytes:
         definitions += bytes([0x93, number, offset & 0xFF, (offset >> 8) & 0xFF,
                               (offset >> 16) & 0xFF])
 
-    body = bytearray(definitions) + tempo_and_tracks + melody + bass
+    body = bytearray(definitions) + head + tempo_and_tracks + melody + bass
 
     total = header_size + len(body)
     data = bytearray()

@@ -227,6 +227,19 @@ music and the instrument bank out of it, then converts the song like any other f
   volume, expression, transpose, program changes, vibrato depth and ties all arrive
   the way the game's driver plays them, and a jump loop is played once rather than
   followed forever;
+* **the tempo is read from the head of the sequence**, the short command stream
+  between the track table and the first track, where an SSEQ keeps the settings that
+  belong to the whole song. Nothing names that region as a track, so a reader that
+  only walks tracks plays *every* song at the default 120 BPM: New Super Mario Bros.
+  is written at 200 and 226, and at 120 its overworld theme came out at two thirds
+  speed and half the right rhythm. That one line of code was most of "it sounds
+  nothing like the song";
+* **every instrument is measured from its own sample.** A DS "program change" is a
+  slot in the game's bank, not a General MIDI program, so the bank is what knows what
+  the instrument is: each slot's decoded sample gives its brightness (which sets the
+  pulse width — 12.5 % for a bright sound, 50 % for a warm one), its envelope (a
+  plucked shape or a held one) and its pan. Treating slot numbers as GM programs
+  made a piano, a string pad and a bass line arrive as the same 50 % square;
 * **the bank** is read from the SBNK plus the SWAR wave archives it points at:
   direct instruments, key-range instruments and the eight-region kind, with each
   zone's root key, pan and loop points;
@@ -236,6 +249,15 @@ music and the instrument bank out of it, then converts the song like any other f
   played or edited outside this tool). `--wav-only` turns both off;
 * **the kit is found in the bank** — the instrument with one wave per key is the
   drum kit, and its notes become percussion instead of a bass line (see below).
+
+**A DS soundtrack has more parts than a NES has voices**, and it is worth knowing
+which is the limitation. The overworld theme is 13 tracks; four voices keep the tune,
+the bass and the drums and leave about 300 notes out, and the tool says so and points
+at the fix. Press **CHIPS → ALL** (or pass `--extensions dual,pce`) and the same song
+keeps **2592 of 2593 notes** across 12 voices — melody, bass, drums and every counter
+line, each with its own channel, at the game's own tempo. It is still square waves and
+a triangle instead of the DS's samples: that is what an 8-bit conversion is, and it is
+the one gap no amount of level-matching closes.
 
 **A ROM can hold more than one sound archive, and the tool reads all of them.** New
 Super Mario Bros. has two: a small one with the mini-games' jingles and a large one
@@ -506,6 +528,14 @@ every note it drops. That is one reason a conversion is *correct* and still hard
 follow — but it is not the only one, and the other two are worse because they make
 the tool sound broken:
 
+* **the songs were played at the wrong speed.** A DS sequence keeps its tempo in its
+  head, a part of the file that is not a track; only tracks were read, so every song
+  ran at the default 120 BPM — two thirds speed for a 200 BPM tune, half for a 226 —
+  and dragging is the surest way to make music unrecognisable;
+* **every instrument was the same square wave.** A DS program change is a slot in the
+  game's bank, and reading it as a General MIDI program meant a piano, a pad and a
+  bass all became one 50 % pulse with one generic envelope. The bank's samples say
+  what the instruments are, and they are now measured;
 * **the songs were never found.** A ROM can hold several sound archives; only the
   first was read, so the song list was all jingles and the "song" converted was a
   two-second fanfare (see the DS section above);

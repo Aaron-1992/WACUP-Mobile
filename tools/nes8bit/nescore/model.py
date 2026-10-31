@@ -32,6 +32,11 @@ class Note:
     wave: str = "square50"  # PC Engine wave RAM: which of the 32-step waves
     pan: float = 0.0        # -1 left .. 1 right, 0 = centre (pannable chips)
 
+    # filled in by an importer that knows more than a program number does — a DS
+    # bank says what its instruments actually are, by holding their samples
+    envelope: str = ""      # a FAMILY_ENVELOPE name, from the instrument's own shape
+    duty_fixed: bool = False   # the duty below came from the sample, not from GM
+
     def end(self) -> float:
         return self.start + self.dur
 

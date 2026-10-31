@@ -282,11 +282,15 @@ def _advice(result: Result, stats, grouped, stems, duration: float,
         if heard and heard["gap"] < -2.0:
             lines.append("the melody sits %.0f dB under the rest of the mix"
                          % -heard["gap"])
+    parts = len(getattr(song, "parts", lambda: {})()) if song else 0
     if stats.left_out.get("melody"):
         lines.append("%d melody note(s) were left out" % stats.left_out["melody"])
     elif stats.simplified:
-        lines.append("%d note(s) left out: every voice was busy"
-                     % stats.simplified)
+        busy = "%d note(s) left out: every voice was busy" % stats.simplified
+        if parts and parts > 4 and result.voices <= 4:
+            busy += (" — this song has %d parts; CHIPS → ALL (--extensions "
+                     "dual,pce) gives the console 12 voices" % parts)
+        lines.append(busy)
     if stats.folded:
         lines.append("%d note(s) moved by whole octaves to fit the chip"
                      % stats.folded)

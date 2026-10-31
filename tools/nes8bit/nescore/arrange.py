@@ -218,6 +218,13 @@ def _duty_for(note: Note) -> float:
     one for body down low. Ignoring the register is what makes transcriptions sound
     shrill on top and hollow underneath.
     """
+    if getattr(note, "duty_fixed", False):
+        # the file's own instrument already said what it sounds like: a DS bank
+        # holds the samples, and slot numbers are not General MIDI programs
+        duty = note.duty
+        if note.pitch >= 91 and duty > 0.125:
+            duty = 0.125
+        return duty
     _kind, duty = gm.timbre(note.program)
     if note.role == "bass":
         duty = 0.5

@@ -1330,6 +1330,9 @@ def recognition_test() -> None:
     from nescore import nds
     from nescore.demo import Track, BEAT, BAR, DIVISION
 
+    def analyse_and_name(song):
+        return analyze.analyse(song)
+
     work = tempfile.mkdtemp(prefix="chip8bit-recog-")
     print("finding the songs in a ROM with two sound archives")
 
@@ -1344,6 +1347,49 @@ def recognition_test() -> None:
     check("a song from the second archive keeps its own bank",
           entry.bank == 1 and bank == 1, "entry %d chosen %d" % (entry.bank, bank))
     check("and it still has its notes", len(song.notes) >= 3, str(len(song.notes)))
+
+    print("playing the song at the speed the game plays it")
+    # Nintendo's own sequences keep the tempo in the head, between the track
+    # table and the first track, where nothing names it as a track. Walking only
+    # tracks means every song plays at the default 120 BPM — half speed.
+    hasty = rom_tools.build_sseq(head_tempo=200)
+    at_120 = nds.read_sequence(rom_tools.build_sseq())
+    fast = nds.read_sequence(hasty)
+    check("the tempo written in the sequence head is the song's tempo",
+          abs(fast.tempo - 200.0) < 0.5, "%.1f" % fast.tempo)
+    check("and the song is really played that fast, not just labelled",
+          abs(fast.duration - at_120.duration * at_120.tempo / 200.0) < 0.05,
+          "%.2f s at 200 vs %.2f s at %.0f" % (fast.duration, at_120.duration,
+                                               at_120.tempo))
+    check("a sequence with no tempo anywhere still gets a sane one",
+          0 < nds.read_sequence(rom_tools.build_short_sseq()).tempo <= 480)
+
+    print("giving each instrument the tone of its own sample")
+    with_sound = os.path.join(work, "samples.nds")
+    rom_tools.write(with_sound)
+    sound_archive, _title = nds.open_archive(with_sound)
+    timbres = nds.bank_timbres(sound_archive, 0)
+    check("the bank's instruments are measured", len(timbres) >= 2, str(timbres))
+    # slot 0 is a low sine, slot 1 a 16-bit square: the square is the bright one
+    duties = {slot: round(hint["duty"], 3) for slot, hint in timbres.items()}
+    check("a bright sample gets a thinner pulse than a warm one",
+          timbres[1]["duty"] < timbres[0]["duty"], str(duties))
+    check("and each instrument gets an envelope of its own",
+          all(hint["family"] for hint in timbres.values()), str(timbres))
+    tones = nds.read_sequence(rom_tools.build_sseq(program_value=0))
+    painted = nds.mark_timbres(tones, sound_archive, 0)
+    with_samples = [note for note in tones.notes if note.program == 0]
+    without = [note for note in tones.notes if note.program != 0]
+    check("the notes take those hints",
+          painted == len(with_samples) == 5 and
+          all(note.duty_fixed and note.envelope for note in with_samples),
+          "%d painted, %d notes on that slot" % (painted, len(with_samples)))
+    check("and the notes whose instrument has no sample keep the old rules",
+          all(not note.duty_fixed and not note.envelope for note in without),
+          str([(n.program, n.duty_fixed) for n in without]))
+    check("a note whose instrument has no sample behind it keeps the old rules",
+          nds.mark_timbres(nds.read_sequence(rom_tools.build_sseq()), sound_archive,
+                           0) == 0)
 
     print("telling drums from music")
 
@@ -1392,6 +1438,23 @@ def recognition_test() -> None:
           str([(v.role, v.part, len(v.notes)) for v in analysis.voices]))
     check("and the sparkle line is not thrown away as melody",
           all(voice.part != 1 or voice.role != "melody" for voice in analysis.voices))
+
+    # a song written entirely around middle C — which is what a DS soundtrack
+    # looks like when its bass sample is played an octave up — still has a bottom
+    low_a = [(index * 0.5, 0.45, 55 + (index % 4)) for index in range(16)]
+    low_b = [(index * 1.0, 0.9, 50 + (index % 3)) for index in range(8)]
+    mid_top = [(index * 0.5, 0.45, 72 + (index % 5)) for index in range(16)]
+    song = Song(notes=part(0, low_a) + part(1, low_b) + part(2, mid_top),
+                tempo=120)
+    analysis = analyse_and_name(song)
+    roles = [voice.role for voice in analysis.voices]
+    check("a song with nothing in the bass register still gets a bass line",
+          "bass" in roles, str([(v.role, v.part, round(v.register))
+                                for v in analysis.voices]))
+    check("and the melody is still the top line",
+          any(voice.role == "melody" and voice.part == 2
+              for voice in analysis.voices),
+          str([(v.role, v.part) for v in analysis.voices]))
 
     print("putting the tune on top")
     levels = mix_module.audibility({"melody": mix_module.ROLE_TARGET["melody"],

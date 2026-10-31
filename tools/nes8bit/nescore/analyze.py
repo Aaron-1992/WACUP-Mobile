@@ -407,6 +407,16 @@ def _settle_roles(voices: List[Voice], percussion: bool,
         candidate = min(melodic, key=lambda v: (v.register, -len(v.notes)))
         if candidate.register < 58 and candidate.role != "melody":
             candidate.role = "bass"
+        else:
+            # No line lives in the bass register, but a song still has a bottom:
+            # on a DS soundtrack the lowest part is often written around middle C
+            # and played on a bass sample. Naming it is what puts it on the
+            # triangle; without it the triangle sits empty and a mid-range
+            # counter line takes the channel that ought to carry the harmony.
+            low = [v for v in melodic if v is not contender and spread(v) >= 5
+                   and v.mean_duration >= 0.10 and v.register < 66]
+            if low:
+                min(low, key=lambda v: v.register).role = "bass"
     elif len(basses) > 1:
         # keep the lowest as the real bass, the others become low harmony
         basses.sort(key=lambda v: v.register)

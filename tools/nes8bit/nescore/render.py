@@ -118,9 +118,17 @@ _SHAPES: Dict[int, tuple] = {}
 
 
 def envelope_shape(note: Note) -> tuple:
-    """The envelope a note's instrument would use, cached per program."""
+    """The envelope a note's instrument would use, cached per program.
+
+    A DS bank measures its own instruments, so an imported note can carry the
+    shape its sample actually has — which is better than guessing it from a
+    program number that was never a General MIDI program in the first place.
+    """
     if note.role == "drum":
         return DRUM_ENVELOPE
+    named = getattr(note, "envelope", "")
+    if named:
+        return FAMILY_ENVELOPE.get(named, DEFAULT_ENVELOPE)
     program = int(note.program)
     shape = _SHAPES.get(program)
     if shape is None:

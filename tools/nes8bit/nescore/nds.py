@@ -19,6 +19,7 @@ Composer's SDAT layout. Ticks are 48 per quarter note, which is why the exported
 MIDI uses a 48 division.
 """
 
+import math
 import os
 import struct
 from dataclasses import dataclass, field, replace
@@ -314,6 +315,35 @@ def _pick(symbols: Dict[int, List[str]], part: int, index: int,
     return fallback
 
 
+def _read_head(body: bytes, start: int, end: int):
+    """The tempo and global volume an SSEQ sets before its tracks start.
+
+    The head is a short command stream of its own: panics, the tempo, the master
+    volume, sometimes a one-bar lead-in. Only the two settings that change the
+    whole song are taken from it — the tempo (0xE1) and the global volume (0xC2)
+    — because everything else is either per-track or already handled there.
+    """
+    tempo = None
+    volume = None
+    at = max(0, start)
+    end = min(end, len(body))
+    guard = 0
+    while at < end and guard < 256:
+        guard += 1
+        command = body[at]
+        if command == 0xE1 and at + 3 <= len(body):
+            value = _u16(body, at + 1)
+            bpm = value // 0x30 if value > 0x400 else value
+            tempo = max(1, min(480, bpm or 120))
+        elif command == 0xC2 and at + 2 <= len(body):
+            volume = body[at + 1]
+        step = _command_length(body, at)
+        if step <= 0:
+            break
+        at += step
+    return tempo, volume
+
+
 def _read_symbols(data: bytes, block: int, offset: int) -> List[str]:
     if not offset:
         return []
@@ -364,7 +394,15 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
     chosen_bank: Optional[int] = None           # from the first program change
     ticks_per_second_at: Dict[int, float] = {}
 
-    # --- pass 1: find the tracks, and the tempo map, by walking every track
+    # --- pass 0: the head of the sequence, before the first track.
+    #
+    # This is where an SSEQ keeps the things that apply to the whole song —
+    # above all the tempo (0xE1). Walking only the tracks (which start after
+    # this) meant every song played at the default 120 BPM: New Super Mario
+    # Bros. is written at 200 and 226, so its music came out at roughly half
+    # speed, dragging and unrecognisable, and the diagnosis cheerfully said
+    # "120 BPM" for every single song in the ROM.
+    table_end = 0
     tempo = 127
     pos = 0
     while pos < len(body):
@@ -374,6 +412,7 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
             offset = body[pos + 2] | (body[pos + 3] << 8) | (body[pos + 4] << 16)
             starts.append((number, offset))
             pos += 5
+            table_end = pos
         elif command == 0xFE and pos + 3 <= len(body):
             pos += 3
         elif command == 0xFF:
@@ -388,6 +427,13 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
 
     if not starts:
         raise NdsError("this sequence has no tracks in it")
+
+    head_end = min(offset for _number, offset in starts)
+    head_tempo, head_volume = _read_head(body, table_end, head_end)
+    if head_tempo:
+        tempo_at[0] = head_tempo
+    if head_volume is not None:
+        global_volume = head_volume
 
     # --- pass 2: walk each track, collecting notes and tempo changes
     for number, offset in starts:
@@ -528,6 +574,7 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
     song.notes = converted
     song.ds_bank = chosen_bank                  # read by load(), if the user
     song.tempo = float(changes[0][1])           # did not pick a bank himself
+    song.tempo_map = [(tick, bpm) for tick, bpm in changes]
     song.title = "SSEQ"
     song.track_names = ["Track %02d" % number for number, _ in starts]
     # The "program change" of a DS sequence is a slot in the game's own bank, not
@@ -738,6 +785,135 @@ def _read_instrument(data: bytes, kind: int, at: int,
             position += 0xC
             low = end + 1
     return zones
+
+
+def bank_timbres(archive: "Archive", bank_index: int) -> Dict[int, dict]:
+    """What each instrument of a bank *sounds like*, read from its own samples.
+
+    A DS "program change" is a slot in the game's bank, not a General MIDI
+    number: slot 4 is whatever the game put there. Treating it as GM meant every
+    instrument in a soundtrack was judged by the wrong name — and since the bank
+    is the only place that knows what these sounds are, the samples have to be
+    read. Three cheap measurements do it, all of them numpy-free:
+
+    * **brightness** (spectral centroid, from the energy of the first difference)
+      decides how thin the pulse should be — a bright sample wants 12.5 %, a warm
+      one 50 %;
+    * **the sample's own envelope** (how it falls away, and whether it loops)
+      decides between a plucked shape and a held one, which is the single biggest
+      difference between a pulse-wave piano and a pulse-wave string pad;
+    * the bank's **sustain** byte says the same thing from the other side, and
+      **pan** is carried through for the chips that have stereo.
+
+    Returns {slot: {family, duty, pan, brightness}}.
+    """
+    out: Dict[int, dict] = {}
+    if not (0 <= bank_index < len(archive.banks)):
+        return out
+    bank = archive.banks[bank_index]
+    waves: Dict[int, dict] = {}
+    for wave_id in bank.wave_archives:
+        blob = archive.waves.get(wave_id)
+        if blob:
+            try:
+                waves.update(read_wave_archive(blob))
+            except NdsError:
+                continue
+    try:
+        instruments = read_bank(bank.sbnk, bank.wave_archives[0]
+                               if bank.wave_archives else 0)
+    except NdsError:
+        return out
+    drums = drum_programs(bank.sbnk, bank.wave_archives[0]
+                          if bank.wave_archives else 0)
+    for slot, zones in enumerate(instruments):
+        if not zones or slot in drums:
+            continue
+        if any(zone.psg for zone in zones):
+            # a PSG instrument is a square or noise generator: its "wave" field
+            # is a duty cycle, not a sample in the archive
+            continue
+        zone = zones[0]
+        wave = waves.get(zone.wave)
+        if not wave:
+            continue
+        measured = _sample_shape(wave["pcm"], wave["rate"])
+        if measured is None:
+            continue
+        brightness = measured["centroid"]
+        if brightness >= 1600.0:
+            duty = 0.125
+        elif brightness >= 900.0:
+            duty = 0.25
+        else:
+            duty = 0.5
+        sustained = wave["looped"] and zone.sustain >= 96
+        if sustained:
+            family = "bass" if brightness < 800.0 else "lead"
+            if measured["jitter"] > 1.1:
+                family = "reed"           # breathy: a clarinet, not a saw
+        elif measured["decay"] < 0.12:
+            family = "piano" if brightness < 1200.0 else "chromatic"
+        elif measured["decay"] < 0.45:
+            family = "guitar" if brightness < 1100.0 else "percussive"
+        else:
+            family = "strings" if zone.sustain >= 80 else "pad"
+        out[slot] = dict(family=family, duty=duty,
+                         pan=max(-1.0, min(1.0, (zone.pan - 64) / 63.0)),
+                         brightness=brightness)
+    return out
+
+
+def _sample_shape(pcm: List[int], rate: int):
+    """Brightness, noisiness and decay of one decoded sample, without numpy."""
+    if len(pcm) < 16 or rate <= 0:
+        return None
+    peak = max(abs(value) for value in pcm) or 1
+    signal = [value / float(peak) for value in pcm]
+    energy = sum(value * value for value in signal) or 1e-9
+    differences = sum((b - a) ** 2 for a, b in zip(signal, signal[1:]))
+    ratio = max(0.0, min(2.0, differences / energy))
+    omega = math.acos(1.0 - ratio / 2.0)
+    centroid = omega / (2.0 * math.pi) * rate
+
+    crossings = [index for index in range(1, len(signal))
+                 if (signal[index - 1] < 0) != (signal[index] < 0)]
+    gaps = [b - a for a, b in zip(crossings, crossings[1:]) if b > a]
+    if len(gaps) > 4:
+        mean = sum(gaps) / len(gaps)
+        spread = math.sqrt(sum((g - mean) ** 2 for g in gaps) / len(gaps))
+        jitter = spread / max(1e-9, mean)
+    else:
+        jitter = 0.0
+
+    head = signal[:max(4, int(len(signal) * 0.2))]
+    loudest = max(abs(value) for value in head) or 1.0
+    tail = signal[max(1, int(len(signal) * 0.6)):]
+    decay = (sum(abs(value) for value in tail) / max(1, len(tail))) / loudest
+    return dict(centroid=centroid, jitter=jitter, decay=decay)
+
+
+def mark_timbres(song: Song, archive: "Archive", bank_index: int) -> int:
+    """Give every note the character of the sample it was written for.
+
+    Without this a DS soundtrack is 13 tracks of identical 50 % pulse: a piano,
+    a string pad and a bass line all arrive as the same square wave, which is why
+    the conversion sounds like a chiptune *about* the song rather than the song.
+    """
+    timbres = bank_timbres(archive, bank_index)
+    if not timbres:
+        return 0
+    marked = 0
+    for note in song.notes:
+        hint = timbres.get(note.program)
+        if not hint or note.role == "drum":
+            continue
+        note.envelope = hint["family"]
+        note.duty = hint["duty"]
+        note.duty_fixed = True
+        note.pan = hint["pan"]
+        marked += 1
+    return marked
 
 
 #: GM drum pieces, low to high. A kit whose keys are not laid out like GM's is
@@ -1236,6 +1412,11 @@ def load_bytes(data: bytes, path: str = "", sequence: str = "",
         if marked:
             song.add_warning("%d drum notes found in the bank's kit instruments"
                              % marked)
+        painted = mark_timbres(song, archive, chosen_bank)
+        if painted:
+            song.add_warning(
+                "%d note(s) took their tone from the bank's own samples"
+                % painted)
     return song, archive, entry, chosen_bank
 
 
