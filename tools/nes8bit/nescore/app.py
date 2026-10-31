@@ -1,15 +1,19 @@
-"""The chip8bit window: a FastTracker II desk, in 1995.
+"""The chip8bit window: a tracker desk, dark.
 
-One native window with three period looks — FastTracker II (the default, taken
-from the v2.04 screenshot: blue frame, lavender buttons, black pattern pages with
-pale blue hex data), Windows 95 and Amiga Workbench. No browser, no server.
+One native window, one look. It is laid out like a tracker — a strip of live
+numbers, a toolbar, the pattern page as the biggest thing on the desk, the chips
+and the files down the right — and it is painted dark: near-black panels, single
+hairline borders, one mint accent, monospaced text everywhere. There is no skin
+switch and there are no bevels; that Windows 95 face is gone for good.
 
 The big pattern page is built from the arrangement that really went to the chips:
 one column per console voice, note / instrument / volume in hex, row numbers down
 the side of every group of four channels, and a play cursor that follows the music.
-The boxes above it show what the converter understood about the file.
+The strip above it shows what the converter understood about the file.
 """
 
+import bisect
+import gc
 import json
 import os
 import queue
@@ -28,8 +32,6 @@ WIDTH, HEIGHT = 1200, 830
 MIN_WIDTH, MIN_HEIGHT = 1000, 740
 FPS = 60
 
-LOOK_LABELS = {"tracker": "FT2 LOOK", "win95": "WIN95 LOOK",
-               "amiga": "AMIGA LOOK"}
 RATES = (22050, 32000, 44100, 48000, 96000)   # what the RATE spinner walks
 GROUP_SIZE = 4             # channels per row-number group, as in FastTracker II
 PATTERN_ROWS = 64          # one tracker pattern
@@ -178,8 +180,8 @@ class App:
         self.clock = pygame.time.Clock()
 
         self.settings_path = settings_path or self._default_settings_path()
-        self.settings, self.look = self._load_settings()
-        self.theme = theme.get(self.look)
+        self.settings = self._load_settings()
+        self.theme = theme.get()
 
         self.fonts: Dict[str, pygame.font.Font] = {}
         self._build_fonts()
@@ -206,6 +208,7 @@ class App:
 
         # widget handles the self test (and the mouse) use
         self.chip_rects: List[tuple] = []
+        self.toolbar_rects: List[pygame.Rect] = []
         self.convert_rect = pygame.Rect(0, 0, 0, 0)
         self.play_rect = pygame.Rect(0, 0, 0, 0)
         self.pattern_row = 0
@@ -227,6 +230,32 @@ class App:
         self._catalogues_reading: set = set()
         self.queue_view = pygame.Rect(0, 0, 0, 0)
         self.results_view = pygame.Rect(0, 0, 0, 0)
+
+        # caches: what is on screen changes far less often than the window is
+        # asked to repaint, so the expensive answers are kept (see _pattern_data,
+        # _paint_rows, _paint_mixer and _surface).
+        self._text_cache: Dict[tuple, pygame.Surface] = {}
+        self._pattern_key = None
+        self._pattern_cache = (None, [], 0.0, 0, {})
+        self._note_counts: Dict[str, int] = {}
+        self._note_spans: Dict[str, List[tuple]] = {}
+        self._note_starts: Dict[str, List[float]] = {}
+        self._mixer_key = None
+        self._mixer_surface: Optional[pygame.Surface] = None
+        self._mixer_cells: List[tuple] = []
+        self._body_key = None
+        self._body_surface: Optional[pygame.Surface] = None
+        self._dirty = True
+        self._last_draw = 0.0
+
+        # A window that holds a whole song in memory makes every full garbage
+        # collection expensive, and one landing inside a repaint is a stutter you
+        # can see. Collect less often, and freeze what was alive at startup (the
+        # fonts, the theme, the widget tables) out of the scans: this is the usual
+        # advice for pygame programs, and it is measurable here — a full pass over
+        # a converted three-minute tune was taking 100 ms or more.
+        gc.set_threshold(20000, 50, 50)
+        gc.freeze()
 
         for path in files or []:
             self.add_path(path)
@@ -253,13 +282,18 @@ class App:
         return os.path.join(base, "chip8bit-settings.json")
 
     def _load_settings(self):
+        """The saved settings, with the old look key simply ignored.
+
+        A settings file written by an older build still holds "look": "win95" or
+        "amiga". There is one look now, so the key is skipped rather than
+        switched to: an upgrade must not put the Windows 95 desk back on screen.
+        """
         settings = convert.Settings()
-        look = "tracker"
         try:
             with open(self.settings_path, "r", encoding="utf-8") as handle:
                 saved = json.load(handle)
         except (OSError, ValueError):
-            return settings, look
+            return settings
         settings.extensions = [name for name in saved.get("extensions", [])
                                if name in chips.EXTENSION_CHANNELS]
         settings.base = bool(saved.get("base", True))
@@ -267,8 +301,7 @@ class App:
         settings.export_vgm = bool(saved.get("export_vgm", False))
         settings.sharing = False        # never resurrect arpeggio cramming
         settings.sampled_drums = bool(saved.get("sampled_drums", True))
-        look = saved.get("look", "tracker")
-        return settings, look
+        return settings
 
     def _save_settings(self) -> None:
         try:
@@ -280,7 +313,6 @@ class App:
                     "export_vgm": self.settings.export_vgm,
                     "sharing": self.settings.sharing,
                     "sampled_drums": self.settings.sampled_drums,
-                    "look": self.look,
                 }, handle, indent=2)
         except OSError:
             pass
@@ -607,11 +639,15 @@ class App:
             self.messages.put(("done",))
 
     def _drain(self) -> None:
+        """Take whatever the worker threads have finished, without blocking."""
         while True:
             try:
                 message = self.messages.get_nowait()
             except queue.Empty:
                 return
+            # a finished conversion or a read song list changes the picture, and
+            # no event will be coming to say so: paint the next frame
+            self._dirty = True
             if message[0] == "catalogue":
                 _tag, path, catalogue, note = message
                 self._catalogue_arrived(path, catalogue, note)
@@ -878,11 +914,6 @@ class App:
 
     # ----------------------------------------------------------------- switches
 
-    def switch_look(self) -> None:
-        self.theme = theme.next_theme(self.look)
-        self.look = self.theme.key
-        self._build_fonts()
-        self._save_settings()
 
     def toggle_chip(self, name: str) -> None:
         """Switch one chip on or off.
@@ -1015,46 +1046,88 @@ class App:
         return self.fonts["pattern"].get_height() + 6
 
     def _layout(self):
-        """Every panel in the window, recomputed from the current size."""
+        """Every panel in the window, recomputed from the current size.
+
+        The shape is FamiTracker's: a strip of live numbers at the top, a toolbar
+        under it, the pattern page as the biggest thing on the desk, and the
+        chips / files / converted panels down the right-hand side. Nothing is
+        beveled and nothing overlaps, so every panel is one flat rectangle with a
+        hairline around it.
+        """
         width, height = self.screen.get_size()
         outer = pygame.Rect(0, 0, width, height)
         content = outer.inflate(-8, -8)
 
+        top_h = 46            # the live number boxes
+        toolbar_h = 40        # ADD / CONVERT / PLAY …
         status_h = 26
-        top_h = 108
-        scope_h = 86
-        right_w = max(286, min(330, int(content.width * 0.27)))
+        info_h = 64           # three lines of "what I found"
+        mixer_h = 62          # the channel meters
+        right_w = max(272, min(322, int(content.width * 0.25)))
 
         top = pygame.Rect(content.x, content.y, content.width, top_h)
-        scope = pygame.Rect(content.x, top.bottom + 4, content.width, scope_h)
-        status = pygame.Rect(content.x, content.bottom - status_h,
-                             content.width, status_h)
-        body_top = scope.bottom + 4
+        toolbar = pygame.Rect(content.x, top.bottom + 4, content.width, toolbar_h)
+        status = pygame.Rect(content.x, content.bottom - status_h, content.width,
+                             status_h)
+
+        # the analysis strip and the channel meters run the whole width, the way
+        # a tracker keeps its song info and its scopes across the top; only the
+        # pattern page and the side panels share the height below them
+        info = pygame.Rect(content.x, toolbar.bottom + 4, content.width, info_h)
+        mixer = pygame.Rect(content.x, info.bottom + 4, content.width, mixer_h)
+        body_top = mixer.bottom + 4
         body_bottom = status.y - 4
-        pattern = pygame.Rect(content.x, body_top,
-                              content.width - right_w - 6, body_bottom - body_top)
-        side = pygame.Rect(pattern.right + 6, body_top, right_w,
+        side = pygame.Rect(content.right - right_w, body_top, right_w,
                            body_bottom - body_top)
-        return outer, content, top, scope, pattern, side, status
+        pattern = pygame.Rect(content.x, body_top, side.x - content.x - 6,
+                              body_bottom - body_top)
+        return outer, content, top, toolbar, info, mixer, pattern, side, status
 
     def _pattern_rect(self) -> pygame.Rect:
-        return self._layout()[4]
+        """The panel the pattern page sits in."""
+        return self._layout()[6]
+
+    def _pattern_page(self) -> pygame.Rect:
+        """The pattern page itself: the dark well inside that panel."""
+        rect = self._pattern_rect()
+        return pygame.Rect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8)
 
     # ----------------------------------------------------------------- drawing
+
+    def _needs_redraw(self) -> bool:
+        """Whether this frame has anything new to show.
+
+        A still window — nothing playing, no batch running, no event — has
+        nothing to redraw, and painting a 1200x830 desk sixty times a second only
+        to produce the identical picture is where a lot of the old stutter came
+        from. Anything that plays or works redraws every frame, because the play
+        cursor and the progress bars move; otherwise the window redraws when
+        something happened, with a slow refresh as a safety net.
+        """
+        if self._dirty:
+            self._dirty = False
+            return True
+        if self.busy or self.playing is not None:
+            return True
+        return time.time() - self._last_draw > 0.5
 
     def draw(self) -> None:
         self.hits = []
         self.songs_buttons = []
         self.song_rows = []
+        self.toolbar_rects = []
         self.mouse = pygame.mouse.get_pos()
         t = self.theme
         self.screen.fill(t.desktop)
 
-        outer, content, top, scope, pattern, side, status = self._layout()
+        (outer, _content, top, toolbar, info, mixer,
+         pattern, side, status) = self._layout()
         theme.frame(self.screen, outer, t)
 
-        self._draw_header(top)
-        self._draw_scope(scope)
+        self._draw_top(top)
+        self._draw_toolbar(toolbar)
+        self._draw_info(info)
+        self._draw_mixer(mixer)
         self._draw_pattern(pattern)
         self._draw_side(side)
         self._draw_status(status)
@@ -1063,10 +1136,29 @@ class App:
             # open, so a stray click cannot start a conversion or move the queue.
             self.hits = []
             self._draw_song_window(outer)
+        self._last_draw = time.time()
+
+    def _surface(self, font: str, text: str, colour) -> pygame.Surface:
+        """A rendered line, kept between frames.
+
+        The pattern page, the channel meters and the chip rows draw the same few
+        hundred strings over and over. Re-rendering antialiased text every frame
+        was the single biggest cost in the window; this keeps them. The cache is
+        bounded, so a thousand file names cannot grow it without limit.
+        """
+        key = (font, text, colour)
+        cache = self._text_cache
+        found = cache.get(key)
+        if found is None:
+            if len(cache) > 1500:
+                cache.clear()
+            found = self.fonts[font].render(text, self.theme.smooth, colour)
+            cache[key] = found
+        return found
 
     def _text(self, x, y, text, font="body", color=None):
         t = self.theme
-        surface = self.fonts[font].render(text, t.smooth, color or t.text)
+        surface = self._surface(font, text, color or t.text)
         self.screen.blit(surface, (x, y))
         return surface
 
@@ -1095,95 +1187,173 @@ class App:
 
     # ------------------------------------------------------------------ header
 
-    def _draw_header(self, rect: pygame.Rect) -> None:
-        """The FT2 top strip: settings boxes, logo, and what the file contained."""
+    # ------------------------------------------------------------------- top
+
+    def _draw_top(self, rect: pygame.Rect) -> None:
+        """The strip along the top: the name, and four live number boxes."""
         t = self.theme
-        self.screen.fill(t.desk, rect)
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+        self._draw_mark(pygame.Rect(rect.x + 16, rect.y, 330, rect.height))
 
-        # --- left: the little numeric boxes with arrows, like FT2's tempo boxes
-        left = pygame.Rect(rect.x, rect.y, 250, rect.height)
-        theme.panel(self.screen, left, t)
-        field_font = self.fonts["small"]
+        more_chips = lambda: self.step_chips(1)          # noqa: E731
+        fewer_chips = lambda: self.step_chips(-1)        # noqa: E731
+        groups = [
+            ("VOICES", "%02d" % self.voice_count(), more_chips, fewer_chips),
+            ("CHIPS", "%02d" % self.chip_count(), more_chips, fewer_chips),
+            ("BITS", "%02d" % self.settings.bits,
+             lambda: self.set_bits(16), lambda: self.set_bits(8)),
+            ("RATE", "%dk" % (self.settings.rate // 1000),
+             lambda: self.step_rate(1), lambda: self.step_rate(-1)),
+        ]
 
-        def value_box(x, y, w, label, value, up_action=None, down_action=None):
-            """A framed number with a pair of arrows, like FT2's tempo boxes.
-
-            The arrows are real: a box that shows a number you cannot change is
-            a box that lies about being a control.
-            """
-            self._text(x, y - 13, label, "tiny", t.dim)
-            box = pygame.Rect(x, y, w - 28, 26)
-            theme.numeric(self.screen, box, t, value, field_font)
-            up = pygame.Rect(box.right + 3, y, 23, 12)
-            down = pygame.Rect(box.right + 3, y + 14, 23, 12)
+        arrow_w, box_w = 23, 44
+        label_font = self.fonts["tiny"]
+        x = rect.right - 14
+        for label, value, up_action, down_action in reversed(groups):
+            label_w = label_font.size(label)[0]
+            x -= label_w + 8 + box_w + 3 + arrow_w
+            self.screen.blit(self._surface("tiny", label, t.dim),
+                             (x, rect.centery - label_font.get_height() // 2))
+            box = pygame.Rect(x + label_w + 8, rect.centery - 13, box_w, 26)
+            theme.numeric(self.screen, box, t, value, self.fonts["small"])
+            up = pygame.Rect(box.right + 3, box.y, arrow_w, 12)
+            down = pygame.Rect(box.right + 3, box.y + 14, arrow_w, 12)
             for arrow_rect, direction, action in ((up, "up", up_action),
                                                   (down, "down", down_action)):
                 theme.arrow(self.screen, arrow_rect, t, direction)
                 if action:
                     self.hits.append((arrow_rect.copy(), action))
-            return box
+            x -= 20
 
-        more_chips = lambda: self.step_chips(1)          # noqa: E731
-        fewer_chips = lambda: self.step_chips(-1)        # noqa: E731
-        value_box(left.x + 8, left.y + 20, 116, "VOICES",
-                  "%02d" % self.voice_count(), more_chips, fewer_chips)
-        value_box(left.x + 134, left.y + 20, 108, "CHIPS",
-                  "%02d" % self.chip_count(),
-                  more_chips, fewer_chips)
-        value_box(left.x + 8, left.y + 62, 116, "BITS",
-                  "%02d" % self.settings.bits,
-                  lambda: self.set_bits(16), lambda: self.set_bits(8))
-        value_box(left.x + 134, left.y + 62, 108, "RATE",
-                  "%dk" % (self.settings.rate // 1000),
-                  lambda: self.step_rate(1), lambda: self.step_rate(-1))
-
-        # --- middle: the logo block
-        logo_x = left.right + 6
-        logo_w = max(210, min(292, int(rect.width * 0.24)))
-        logo = pygame.Rect(logo_x, rect.y, logo_w, rect.height)
-        theme.panel(self.screen, logo, t)
-        self._draw_logo(logo)
-
-        # --- right: "what I found", in the place of FT2's "Composed by" box
-        info = pygame.Rect(logo.right + 6, rect.y, rect.right - logo.right - 6,
-                           rect.height)
-        inner = theme.panel(self.screen, info, t, "WHAT I FOUND", self.fonts["tiny"])
-        theme.field(self.screen, inner, t, t.field)
-        lines = [line for line in self._found_lines()[:4]]
-        colours = (t.field_text, t.pattern_inst, t.pattern_vol, t.accent)
-        keys = ("body", "small", "small", "tiny")
-        shown = [index for index, line in enumerate(lines) if line]
-        if not shown:
-            return
-        # the four lines have to fit the panel they are drawn in: a line that
-        # runs under the frame is a line nobody can read
-        needed = sum(self.fonts[keys[index]].get_height() for index in shown)
-        step = 5
-        if needed + step * (len(shown) - 1) > inner.height - 6:
-            step = max(0, (inner.height - 6 - needed) // max(1, len(shown) - 1))
-        y = inner.y + 3
-        for index in shown:
-            key = keys[index]
-            font = self.fonts[key]
-            self._text(inner.x + 8, y, _fit(font, lines[index], inner.width - 16),
-                       key, colours[min(index, 3)])
-            y += font.get_height() + step
-
-    def _draw_logo(self, rect: pygame.Rect) -> None:
+    def _draw_mark(self, rect: pygame.Rect) -> None:
+        """The name, and what the program is, on one line."""
         t = self.theme
-        font = self.fonts["logo"]
-        parts = [("chip", t.text), ("8", t.frame), ("bit", t.text)]
-        width = sum(font.size(text)[0] for text, _ in parts)
-        x = rect.centerx - width // 2
-        y = rect.centery - font.get_height() // 2 - 4
+        font = self.fonts["title"]
+        parts = (("chip", t.text), ("8", t.accent), ("bit", t.text))
+        x = rect.x
+        y = rect.centery - font.get_height() // 2
         for text, colour in parts:
-            surface = font.render(text, t.smooth, colour)
+            surface = self._surface("title", text, colour)
             self.screen.blit(surface, (x, y))
             x += surface.get_width()
-        caption = self.fonts["small"].render(
-            "NES / 8-bit transcoder", t.smooth, t.dim)
-        self.screen.blit(caption, (rect.centerx - caption.get_width() // 2,
-                                   y + font.get_height() - 4))
+        caption = self._surface("small", "NES / 8-bit transcoder", t.dim)
+        self.screen.blit(caption, (x + 12, rect.centery - caption.get_height() // 2))
+
+    def _draw_info(self, rect: pygame.Rect) -> None:
+        """What the converter found in the file, in three flat lines.
+
+        This used to be a titled panel with a sunken well around it, which cost a
+        third of the top of the window and read like a 1995 message box. It is a
+        strip now: a marker line, then the song and what came out of it.
+        """
+        t = self.theme
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+        self.screen.fill(t.accent, (rect.x + 1, rect.y + 1, 3, rect.height - 2))
+
+        # the kept / left-out totals get their own accent line on the right, so
+        # the strip does not say the same number twice
+        lines = [line for line in self._found_lines()
+                 if "notes kept" not in line]
+        keys = ("body", "small", "small", "tiny")
+        colours = (t.field_text, t.pattern_inst, t.pattern_vol, t.dim)
+        summary = self._result_summary()
+        totals = self._surface("tiny", summary, t.accent) if summary else None
+
+        x = rect.x + 14
+        y = rect.y + 7
+        shown = [index for index, line in enumerate(lines[:3]) if line]
+        if not shown:
+            return
+        for position, index in enumerate(shown):
+            key = keys[index]
+            font = self.fonts[key]
+            room = rect.right - x - 14
+            if position == 0 and totals is not None:
+                # the totals sit at the right of the headline row, so the
+                # headline stops before them instead of running underneath
+                room -= totals.get_width() + 16
+            text = _fit(font, lines[index], room)
+            surface = self._surface(key, text, colours[min(index, 3)])
+            self.screen.blit(surface, (x, y))
+            y += font.get_height() + 3
+
+        if totals is not None:
+            self.screen.blit(totals, (rect.right - totals.get_width() - 14,
+                                      rect.y + 9))
+
+    def _result_summary(self) -> str:
+        """The one-line totals for the selected conversion, or nothing."""
+        if not self.results:
+            return ""
+        result = self.results[min(self.selected_result, len(self.results) - 1)]
+        if not result.ok:
+            return "CONVERSION FAILED"
+        text = "%d KEPT" % result.kept
+        if getattr(result, "left_out", 0):
+            text += " · %d OUT" % result.left_out
+        if getattr(result, "thinned", 0):
+            text += " · %d THINNED" % result.thinned
+        return text
+
+    def _draw_toolbar(self, rect: pygame.Rect) -> None:
+        """The toolbar: one flat row of buttons, the way a tracker has one."""
+        t = self.theme
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+
+        has_results = bool(self.results)
+        buttons = [
+            ("ADD MUSIC", self.pick_files, True, False),
+            ("DEMO", self.add_demo, True, False),
+            (None, None, False, False),
+            ("CONVERT %d" % len(self.items) if self.items else "CONVERT",
+             self.start_convert, bool(self.items) and not self.busy, True),
+            ("STOP", self.stop, self.playing is not None or self.busy, False),
+            (None, None, False, False),
+            ("PLAY", self.play_selected, has_results, False),
+            ("SAVE AS", self.save_selected, has_results, False),
+            ("FOLDER", self.open_folder_selected, has_results, False),
+        ]
+        height = 30
+        x = rect.x + 8
+        y = rect.y + (rect.height - height) // 2
+        font = self.fonts["button"]
+        for label, action, enabled, primary in buttons:
+            if label is None:
+                self.screen.fill(t.dark, (x + 4, y + 5, 1, height - 10))
+                x += 16
+                continue
+            width = max(80, font.size(label)[0] + 26)
+            box = pygame.Rect(x, y, width, height)
+            hover = enabled and box.collidepoint(self.mouse)
+            theme.button(self.screen, box, t, label, font,
+                         pressed=(primary and self.busy), enabled=enabled,
+                         primary=primary, hover=hover)
+            self.toolbar_rects.append(box.copy())
+            if enabled:
+                self.hits.append((box.copy(), action))
+            if action == self.start_convert:
+                self.convert_rect = box.copy()
+            elif action == self.play_selected:
+                self.play_rect = box.copy()
+            x += width + 6
+
+        # the rest of the strip says what the queue is doing, which is the one
+        # thing you look at before pressing CONVERT
+        if self.busy:
+            hint, colour = (self.progress_label or "working", t.warn)
+        elif self.items:
+            hint = "%d FILE%s READY" % (len(self.items),
+                                        "" if len(self.items) == 1 else "S")
+            colour = t.pattern_inst
+        else:
+            hint, colour = "DROP MUSIC ANYWHERE ON THIS WINDOW", t.pattern_empty
+        surface = self._surface("tiny", _fit(self.fonts["tiny"], hint,
+                                             rect.right - x - 24), colour)
+        self.screen.blit(surface, (rect.right - surface.get_width() - 12,
+                                   rect.centery - surface.get_height() // 2))
 
     def _found_lines(self):
         if not self.results:
@@ -1234,60 +1404,97 @@ class App:
 
     # ------------------------------------------------------------------- scope
 
-    def _draw_scope(self, rect: pygame.Rect) -> None:
-        """The row of little waveform boxes FT2 shows for every channel."""
+    # ----------------------------------------------------------------- meters
+
+    def _draw_mixer(self, rect: pygame.Rect) -> None:
+        """The row of channel meters: one cell per voice the console can have.
+
+        Two rows of sixteen holds every voice there is (4 APU + the cartridge
+        chips + a second NES + a PC Engine = 32), and each cell shows the voice's
+        name and how much of the song it plays. While music plays, the voices
+        sounding under the playhead light up.
+
+        The cells are painted once into a surface and kept: this used to walk
+        every note of the song once per cell, thirty-two times a frame, which was
+        5.8 ms of the frame for a picture that hardly changes.
+        """
         t = self.theme
-        self.screen.fill(t.desk, rect)
-        theme.panel(self.screen, rect, t)
-        area = pygame.Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6)
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+        area = pygame.Rect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8)
 
-        result, _channels, _row_seconds, _rows, grid = self._pattern_data()
-        active = [spec.id for spec in self.settings.channels()]
-        every = [spec.id for spec in
-                 chips.build_channel_set(chips.ordered_extensions())]
+        self._pattern_data()            # cached, and the meters read its counts
+        active = tuple(spec.id for spec in self.settings.channels())
+        every = tuple(spec.id for spec in
+                      chips.build_channel_set(chips.ordered_extensions()))
+        key = (every, active, area.size, self._pattern_key)
+        if key != self._mixer_key or self._mixer_surface is None:
+            self._mixer_surface, self._mixer_cells = self._paint_mixer(
+                area.size, every, active)
+            self._mixer_key = key
+        self.screen.blit(self._mixer_surface, area.topleft)
 
-        # Two rows of sixteen holds every voice the console can have (4 APU +
-        # the cartridge chips + a second NES + a PC Engine = 32). It used to be
-        # two rows of eleven, which silently hid the last ten voices.
-        per_row = 16
-        rows = 2
-        box_w = (area.width - (per_row - 1) * 3) // per_row
-        box_h = (area.height - (rows - 1) * 3 - 2) // rows
-        duration = 1.0
-        if result is not None and getattr(result, "notes", None):
-            duration = max(0.2, max(n.end() for n in result.notes))
+        if self.playing is None:
+            return
+        position = pygame.mixer.music.get_pos() if pygame.mixer.get_init() else -1
+        if position < 0:
+            return
+        live = self._sounding(position / 1000.0)
+        if not live:
+            return
+        for channel, cell, bar in self._mixer_cells:
+            if channel not in live:
+                continue
+            box = cell.move(area.topleft)
+            pygame.draw.rect(self.screen, t.accent, box, 1)
+            self.screen.fill(t.accent, bar.move(area.topleft))
 
-        for index in range(min(len(every), per_row * rows)):
-            column = index % per_row
-            row = index // per_row
-            box = pygame.Rect(area.x + column * (box_w + 3),
-                              area.y + row * (box_h + 3), box_w, box_h)
-            live = every[index] in active
-            self.screen.fill(t.field if live else t.stripe, box)
-            theme.sunken(self.screen, box, t, 1)
-            if live:
-                self._draw_scope_trace(box, every[index], result, duration)
-            else:
-                mid = box.centery + 7
-                self.screen.fill(t.pattern_empty,
-                                 (box.x + 4, mid, box.width - 8, 1))
+    def _paint_mixer(self, size, every, active):
+        """Paint the static meter cells; returns the surface and their geometry."""
+        t = self.theme
+        surface = pygame.Surface(size)
+        surface.fill(t.panel)
+        per_row, rows, gap = 16, 2, 3
+        cell_w = (size[0] - (per_row - 1) * gap) // per_row
+        cell_h = (size[1] - (rows - 1) * gap) // rows
+        counts = self._note_counts
+        busiest = max(counts.values()) if counts else 0
+        cells = []
+        for index, channel in enumerate(every[:per_row * rows]):
+            cell = pygame.Rect((index % per_row) * (cell_w + gap),
+                               (index // per_row) * (cell_h + gap), cell_w, cell_h)
+            on = channel in active
+            surface.fill(t.field if on else t.stripe, cell)
+            pygame.draw.rect(surface, t.dark, cell, 1)
+            number = self._surface("tiny", "%02d" % (index + 1),
+                                   t.pattern_vol if on else t.pattern_empty)
+            surface.blit(number, (cell.x + 4, cell.y + 2))
+            name_colour = t.field_text if on else t.pattern_empty
+            name = self._surface("tiny", _channel_short(channel), name_colour)
+            name_x = cell.x + 4 + number.get_width() + 5
+            if name_x + name.get_width() <= cell.right - 3:
+                # a narrow window shows the number alone rather than half a name
+                surface.blit(name, (name_x, cell.y + 2))
+            bar = pygame.Rect(cell.x + 4, cell.bottom - 6, cell.width - 8, 3)
+            surface.fill(t.pattern_empty, bar)
+            count = counts.get(channel, 0)
+            if on and count and busiest:
+                width = max(2, int(bar.width * count / float(busiest)))
+                surface.fill(t.pattern_inst, (bar.x, bar.y, width, bar.height))
+            cells.append((channel, cell, bar))
+        return surface, cells
 
-            number = self.fonts["head"].render("%02d" % (index + 1), t.smooth,
-                                               t.pattern_head if live
-                                               else t.pattern_empty)
-            self.screen.blit(number, (box.x + 3, box.y + 1))
-            tag = ""
-            colour = t.pattern_inst
-            if result is not None and live:
-                count = len([n for n in result.notes if n.channel == every[index]])
-                tag = str(count) if count else ""
-            elif not live:
-                tag = "OFF"
-                colour = t.pattern_empty
-            if tag:
-                surface = self.fonts["head"].render(tag, t.smooth, colour)
-                self.screen.blit(surface, (box.right - surface.get_width() - 3,
-                                           box.y + 1))
+    def _sounding(self, at: float):
+        """Which voices have a note under the playhead, right now."""
+        live = set()
+        for channel, starts in self._note_starts.items():
+            spans = self._note_spans[channel]
+            index = bisect.bisect_right(starts, at) - 1
+            for probe in range(max(0, index - 3), index + 1):
+                if spans[probe][1] > at:
+                    live.add(channel)
+                    break
+        return live
 
     def _draw_scope_trace(self, box: pygame.Rect, channel: str, result,
                           duration: float) -> None:
@@ -1331,54 +1538,98 @@ class App:
 
     # ----------------------------------------------------------- pattern data
 
+    # ----------------------------------------------------------- pattern data
+
     def _pattern_data(self):
         """Rows of channel cells for the last conversion, in tracker form.
 
         The row length is chosen from the music, not fixed: a 226 BPM tune needs
         shorter rows than a 90 BPM one, otherwise two notes land in the same cell
         and the page silently hides half the song.
+
+        The answer is cached. The window used to ask for this three times every
+        frame — the meters, the page and a click — and each answer walked every
+        note of the song five times over to pick that row length, which was tens
+        of milliseconds a frame on a long tune and the reason scrolling stuttered.
         """
-        result = (self.results[self.selected_result]
-                  if self.results else None)
+        result = self.results[self.selected_result] if self.results else None
+        channels = tuple(spec.id for spec in self.settings.channels())
+        key = (id(result), self.selected_result, len(self.results), channels)
+        if key == self._pattern_key:
+            return self._pattern_cache
+        data = self._build_pattern(result, channels)
+        self._pattern_key = key
+        self._pattern_cache = data
+        return data
+
+    def _build_pattern(self, result, channel_ids):
+        """The uncached half of `_pattern_data`, plus what the meters need."""
+        self._note_counts: Dict[str, int] = {}
+        self._note_spans: Dict[str, List[tuple]] = {}
+        self._note_starts: Dict[str, List[float]] = {}
         if result is None or not getattr(result, "notes", None):
             return None, [], 0.0, 0, {}
+
+        for note in result.notes:
+            if note.channel:
+                self._note_counts[note.channel] = \
+                    self._note_counts.get(note.channel, 0) + 1
+                self._note_spans.setdefault(note.channel, []).append(
+                    (note.start, note.end()))
+        for channel, spans in self._note_spans.items():
+            spans.sort()
+            self._note_starts[channel] = [span[0] for span in spans]
+
         tempo = float(getattr(result, "tempo", 0.0) or 120.0)
-        channels = [spec.id for spec in self.settings.channels()]
+        channels = list(channel_ids)
         for note in result.notes:
             if note.channel and note.channel not in channels:
                 channels.append(note.channel)
         index_of = {name: index for index, name in enumerate(channels)}
 
-        # pick the row length from the music: the longest rows that still leave
+        # Pick the row length from the music: the longest rows that still leave
         # almost every note in its own cell. A fast tune gets short rows instead of
         # a page that hides half of it.
+        #
+        # The search counts collisions in a set and only builds the note cells
+        # once, for the speed that wins. Building five grids of lists for a
+        # three-minute tune allocated tens of thousands of objects, and those
+        # allocations are what kept waking the garbage collector mid-repaint.
         tolerance = max(2, int(len(result.notes) * 0.01))
-        best = None
+        row_seconds = None
+        fewest = tolerance + 1
         for speed in (PATTERN_SPEED, 4, 3, 2, 1):
             candidate = 2.5 * speed / max(30.0, tempo)
-            cells: Dict[tuple, List] = {}
+            seen = set()
+            collisions = 0
             for note in result.notes:
                 if note.channel in index_of:
-                    cells.setdefault((int(note.start / candidate),
-                                      index_of[note.channel]), []).append(note)
-            collisions = sum(len(group) - 1 for group in cells.values())
+                    key = (int(note.start / candidate), index_of[note.channel])
+                    if key in seen:
+                        collisions += 1
+                    else:
+                        seen.add(key)
             if collisions <= tolerance:
-                best = (candidate, cells)      # coarsest page that still works
+                row_seconds = candidate        # coarsest page that still works
                 break
-            if best is None or collisions < best[0]:
-                best = (candidate, cells)
-        row_seconds, grid = best
+            if collisions < fewest:
+                row_seconds, fewest = candidate, collisions
+        if row_seconds is None:
+            row_seconds = 2.5 * PATTERN_SPEED / max(30.0, tempo)
+        grid: Dict[tuple, List] = {}
+        for note in result.notes:
+            if note.channel in index_of:
+                grid.setdefault((int(note.start / row_seconds),
+                                 index_of[note.channel]), []).append(note)
 
         rows = int(max(n.end() for n in result.notes) / row_seconds) + 2
         return result, channels, row_seconds, rows, grid
 
-    # ----------------------------------------------------------------- pattern
-
     def _draw_pattern(self, rect: pygame.Rect) -> None:
         t = self.theme
-        self.screen.fill(t.desk, rect)
-        theme.panel(self.screen, rect, t)
-        page = pygame.Rect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8)
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+        page = self._pattern_page()
         theme.field(self.screen, page, t, t.field)
         self.mouse_in_pattern = page.collidepoint(self.mouse)
 
@@ -1390,8 +1641,8 @@ class App:
             return
         result, channels, row_seconds, rows, grid = data
 
-        info_h = self.fonts["head"].get_height() + 10
-        head_h = info_h + self.fonts["head"].get_height() + 12
+        info_h = self.fonts["head"].get_height() + 8
+        head_h = self._pattern_head_height()
         row_h = self._row_height()
         font = self.fonts["pattern"]
         gutter = 34
@@ -1431,7 +1682,7 @@ class App:
                 cursor_row = self.pattern_row + offset // row_h
 
         positions = []
-        x = page.x + 4
+        x = 4
         for slot in range(columns):
             if slot % GROUP_SIZE == 0:
                 x += gutter
@@ -1442,39 +1693,79 @@ class App:
                                             page.width - 8, info_h),
                                 channels, cursor_row, row_seconds, rows, result,
                                 grid)
-        self._draw_channel_head(page, info_h, head_h, positions, cell, channels,
-                                first)
+        self._draw_channel_head(page, info_h, head_h,
+                                [page.x + 2 + value for value in positions],
+                                cell, channels, first)
 
-        # rows
+        # The rows are painted into one surface and kept between frames: while
+        # the music plays, a frame is then one blit plus the cursor, instead of
+        # redrawing several hundred note cells sixty times a second.
+        body_key = (id(result), first, self.pattern_row, visible, columns, cell,
+                    row_h, playing_row if playing_row is not None and
+                    self.pattern_row <= playing_row < self.pattern_row + visible
+                    else None, cursor_row, page.width, page.height)
+        if body_key != self._body_key or self._body_surface is None:
+            self._body_key = body_key
+            self._body_surface = self._paint_rows(
+                (page.width - 4, visible * row_h), channels, grid, first, columns,
+                visible, positions, cell, gutter, row_h, playing_row, cursor_row)
+        self.screen.blit(self._body_surface, (page.x + 2, page.y + head_h))
+
+        if pages > 1:
+            self._draw_jump_strip(
+                pygame.Rect(page.right - jump_w - 18, page.y + head_h, jump_w,
+                            page.height - head_h - 6), rows, visible, row_seconds)
+
+        if rows > visible:
+            bar = pygame.Rect(page.right - 12, page.y + head_h, 10,
+                              page.height - head_h - 8)
+            theme.scrollbar(self.screen, bar, t,
+                            self.pattern_row / max(1, rows - visible),
+                            visible / max(1, rows))
+        if len(channels) > columns:
+            bar = pygame.Rect(page.x + 4, page.bottom - 10, page.width - 24, 8)
+            theme.scrollbar(self.screen, bar, t,
+                            first / max(1, len(channels) - columns),
+                            columns / max(1, len(channels)))
+
+        self.hits.append((page, self._pattern_click))
+
+    def _paint_rows(self, size, channels, grid, first, columns, visible, positions,
+                    cell, gutter, row_h, playing_row, cursor_row):
+        """Paint the pattern rows (numbers, gaps, notes) into their own surface."""
+        t = self.theme
+        surface = pygame.Surface(size)
+        surface.fill(t.field)
+        head = self.fonts["head"]
+        empty = self._surface("pattern", "--- · ---", t.pattern_empty)
         for slot in range(visible):
             row_index = self.pattern_row + slot
-            y = page.y + head_h + slot * row_h
-            row_rect = pygame.Rect(page.x + 2, y, page.width - 4, row_h)
+            y = slot * row_h
+            row_rect = pygame.Rect(0, y, size[0], row_h)
             highlight = playing_row is not None and row_index == playing_row
             if highlight:
-                self.screen.fill(t.playing, row_rect)
+                surface.fill(t.playing, row_rect)
             elif row_index % 4 == 0:
-                self.screen.fill(t.stripe, row_rect)
+                surface.fill(t.stripe, row_rect)
 
             pattern_row = row_index % PATTERN_ROWS
             number_colour = (t.pattern_row_beat if pattern_row % 16 == 0
                              else t.pattern_row)
+            if highlight:
+                number_colour = t.playing_text
             for slot_index in range(0, columns, GROUP_SIZE):
-                number_x = positions[slot_index] - gutter + 2
-                number = self.fonts["head"].render(
-                    "%02X" % pattern_row, t.smooth,
-                    t.playing_text if highlight else number_colour)
-                self.screen.blit(number, (number_x, y + 3))
+                number = self._surface("head", "%02X" % pattern_row, number_colour)
+                surface.blit(number, (positions[slot_index] - gutter + 2, y + 3))
 
-            # the blue background shows between each group of four channels
+            # a gap between each group of four channels, so a column can be
+            # followed from the top of the page to the bottom
             for slot_index in range(GROUP_SIZE, columns, GROUP_SIZE):
                 line_x = positions[slot_index] - 3
-                self.screen.fill(t.pattern_group,
-                                 pygame.Rect(line_x, row_rect.y, 3, row_rect.height))
+                surface.fill(t.pattern_group, (line_x, row_rect.y, 3, row_h))
             if row_index == cursor_row:
-                pygame.draw.rect(self.screen, t.cursor, row_rect, 1)
+                pygame.draw.rect(surface, t.cursor, row_rect, 1)
             elif row_index == self.pattern_row and not highlight:
-                pygame.draw.rect(self.screen, t.accent_dark, row_rect, 1)
+                pygame.draw.rect(surface, t.accent_dark, row_rect, 1)
 
             for column in range(columns):
                 index = first + column
@@ -1484,9 +1775,7 @@ class App:
                 notes_here = grid.get((row_index, index))
                 note = notes_here[0] if notes_here else None
                 if note is None:
-                    self.screen.blit(font.render("--- · ---", t.smooth,
-                                                 t.pattern_empty),
-                                     (x + 4, y + 3))
+                    surface.blit(empty, (x + 4, y + 3))
                     continue
                 pitch = gm.pitch_name(note.pitch)
                 letter, octave = pitch[:-1], pitch[-1]
@@ -1494,32 +1783,22 @@ class App:
                 colour = t.playing_text if highlight else t.pattern_note
                 inst_colour = t.playing_text if highlight else t.pattern_inst
                 vol_colour = t.playing_text if highlight else t.pattern_vol
-                self.screen.blit(font.render(name, t.smooth, colour), (x + 4, y + 3))
-                wid = font.size(name)[0]
-                instrument = "%X" % (note.program % 16)
-                self.screen.blit(font.render(instrument, t.smooth, inst_colour),
-                                 (x + 4 + wid + 10, y + 3))
+                note_surface = self._surface("pattern", name, colour)
+                surface.blit(note_surface, (x + 4, y + 3))
+                instrument = self._surface(
+                    "pattern", "%X" % (note.program % 16), inst_colour)
+                surface.blit(instrument, (x + 4 + note_surface.get_width() + 10,
+                                          y + 3))
                 volume = "%02X" % int(round(max(0, min(15, note.volume)) * 0x40 / 15.0))
-                self.screen.blit(font.render(volume, t.smooth, vol_colour),
-                                 (x + 4 + wid + 10 + font.size("0")[0] + 12, y + 3))
-        if pages > 1:
-            self._draw_jump_strip(
-                pygame.Rect(page.right - jump_w - 18, page.y + head_h, jump_w,
-                            page.height - head_h - 6), rows, visible, row_seconds)
+                surface.blit(self._surface("pattern", volume, vol_colour),
+                             (x + 4 + note_surface.get_width() + 10 +
+                              head.size("0")[0] + 12, y + 3))
+        return surface
 
-        if rows > visible:
-            bar = pygame.Rect(page.right - 14, page.y + head_h, 12,
-                              page.height - head_h - 8)
-            theme.scrollbar(self.screen, bar, t,
-                            self.pattern_row / max(1, rows - visible),
-                            visible / max(1, rows))
-        if len(channels) > columns:
-            bar = pygame.Rect(page.x + 4, page.bottom - 12, page.width - 26, 10)
-            theme.scrollbar(self.screen, bar, t,
-                            first / max(1, len(channels) - columns),
-                            columns / max(1, len(channels)))
-
-        self.hits.append((page, self._pattern_click))
+    def _pattern_head_height(self) -> int:
+        """From the top of the page to the first row: info line + column names."""
+        head = self.fonts["head"].get_height()
+        return (head + 8) + head + 10
 
     def _draw_pattern_info(self, rect, channels, cursor_row, row_seconds, rows,
                            result, grid) -> None:
@@ -1598,8 +1877,8 @@ class App:
         if data[0] is None or not self.results:
             return
         row_seconds = data[2]
-        page = self._layout()[4].inflate(-8, -8)
-        offset = self.mouse[1] - (page.y + self.fonts["head"].get_height() + 12)
+        offset = self.mouse[1] - (self._pattern_page().y +
+                                  self._pattern_head_height())
         row = self.pattern_row + max(0, offset // self._row_height())
         if self.playing is not None:
             self.stop()
@@ -1635,39 +1914,6 @@ class App:
         t = self.theme
         self.screen.fill(t.desk, rect)
 
-        # --- buttons, two columns, like the FT2 menu column
-        button_h = 30
-        gap = 5
-        rows = [
-            (("ADD MUSIC", self.pick_files), ("DEMO", self.add_demo)),
-            (("CONVERT", self.start_convert), ("STOP", self.stop)),
-            (("PLAY", self.play_selected), ("SAVE AS", self.save_selected)),
-            (("FOLDER", self.open_folder_selected), ("ALL CHIPS", self.all_chips)),
-            (("16-BIT" if self.settings.bits > 8 else "8-BIT", self.toggle_bits),
-             (LOOK_LABELS.get(self.look, "LOOK"), self.switch_look)),
-        ]
-        col_w = (rect.width - gap) // 2
-        y = rect.y
-        for pair in rows:
-            for column, (label, action) in enumerate(pair):
-                box = pygame.Rect(rect.x + column * (col_w + gap), y,
-                                  col_w, button_h)
-                enabled = True
-                if action == self.start_convert:
-                    label = ("CONVERT %d" % len(self.items) if self.items
-                             else "CONVERT")
-                    enabled = bool(self.items) and not self.busy
-                    self.convert_rect = box.copy()
-                if action in (self.play_selected, self.save_selected,
-                              self.open_folder_selected):
-                    enabled = bool(self.results)
-                    if action == self.play_selected:
-                        self.play_rect = box.copy()
-                self._button(box, label, action, pressed=(
-                    action == self.start_convert and self.busy),
-                    enabled=enabled)
-            y += button_h + gap
-
         # --- chips: two columns, one row per chip, like FT2's button blocks
         # The consoles get a line of their own — the NES APU itself, a second
         # NES and a PC Engine — and the cartridge add-ons share the two columns
@@ -1685,8 +1931,8 @@ class App:
                     if name not in ("dual", "pce")]
         rows_needed = 3 + (len(entries) - 3 + 1) // 2
         row_h = 24
-        chips_h = rows_needed * row_h + 28
-        chips_box = pygame.Rect(rect.x, y + 2, rect.width, chips_h)
+        chips_h = rows_needed * row_h + 36
+        chips_box = pygame.Rect(rect.x, rect.y, rect.width, chips_h)
         inner = theme.panel(self.screen, chips_box, t, "CHIPS", self.fonts["tiny"])
         self._tiny_buttons(chips_box, (("ALL", self.all_chips, 44),
                                        ("NONE", self.no_chips, 52)))
@@ -2079,36 +2325,53 @@ class App:
     # ------------------------------------------------------------------ status
 
     def _draw_status(self, rect: pygame.Rect) -> None:
+        """The bottom line: what the window is doing, and what it is doing it to."""
         t = self.theme
-        self.screen.fill(t.desk, rect)
-        theme.panel(self.screen, rect, t)
-        inner = rect.inflate(-8, -6)
+        self.screen.fill(t.panel, rect)
+        pygame.draw.rect(self.screen, t.dark, rect, 1)
+
+        if self.busy:
+            state, chip = "WORKING", t.warn
+        elif self.playing is not None:
+            state, chip = "PLAYING", t.pattern_inst
+        else:
+            state, chip = "READY", t.accent
+        label = self._surface("tiny", state, t.desktop)
+        box = pygame.Rect(rect.x + 8, rect.centery - 9, label.get_width() + 20, 18)
+        self.screen.fill(chip, box)
+        self.screen.blit(label, (box.centerx - label.get_width() // 2,
+                                 box.centery - label.get_height() // 2))
+
         message = self.progress_label if self.busy else self.status
-        colour = t.bad if self.status_error else t.text
-
-        state = ("WORKING" if self.busy else
-                 ("PLAYING" if self.playing is not None else "READY"))
-        state_surface = self.fonts["button"].render(state, t.smooth, t.text)
-        voices = self.fonts["small"].render(
-            "%d voices · %d chip%s" % (self.voice_count(), self.chip_count(),
-                                       "" if self.chip_count() == 1 else "s"),
-            t.smooth, t.dim)
-        right = inner.right - state_surface.get_width() - 14
-        self.screen.blit(state_surface, (inner.right - state_surface.get_width(), inner.y))
-        self.screen.blit(voices, (right - voices.get_width() - 14, inner.y + 2))
-        self._text(inner.x, inner.y,
-                   _fit(self.fonts["body"], message,
-                        right - voices.get_width() - 20), "body", colour)
-
-    # -------------------------------------------------------------------- loop
+        right = _fit(self.fonts["tiny"], "%d VOICES · %d CHIP%s · %s" % (
+            self.voice_count(), self.chip_count(),
+            "" if self.chip_count() == 1 else "S",
+            self.console_label().upper()), max(80, rect.width // 2))
+        right_surface = self._surface("tiny", right, t.dim)
+        self.screen.blit(right_surface,
+                         (rect.right - right_surface.get_width() - 12,
+                          rect.centery - right_surface.get_height() // 2))
+        room = rect.right - 20 - right_surface.get_width() - (box.right + 12)
+        colour = t.bad if self.status_error else t.field_text
+        text = _fit(self.fonts["small"], message, max(40, room))
+        surface = self._surface("small", text, colour)
+        self.screen.blit(surface, (box.right + 12,
+                                   rect.centery - surface.get_height() // 2))
 
     def run(self) -> int:
+        """The window's loop: handle what happened, then repaint if it matters.
+
+        `_needs_redraw` is what stops the window burning a full repaint sixty
+        times a second while it is sitting still.
+        """
         while self.running:
             for event in pygame.event.get():
+                self._dirty = True        # anything at all may change the picture
                 self.handle_event(event)
             self._drain()
-            self.draw()
-            pygame.display.flip()
+            if self._needs_redraw():
+                self.draw()
+                pygame.display.flip()
             self.clock.tick(FPS)
         self.stop()
         pygame.quit()
@@ -2280,7 +2543,17 @@ def selftest(screenshot: Optional[str] = None) -> int:
 
     try:
         check("window opens", app.screen.get_size() == (WIDTH, HEIGHT))
-        check("starts in the tracker look", app.look == "tracker", app.look)
+        check("one dark look, and no look switch",
+              app.theme.key == "dark" and len(theme.THEMES) == 1 and
+              not hasattr(app, "switch_look"),
+              "%s / %s" % (app.theme.key, sorted(theme.THEMES)))
+        check("the desk is dark and flat",
+              sum(app.theme.desktop) < 120 and app.theme.border == 1 and
+              app.theme.rounded == 0, str(app.theme.desktop))
+        check("no skin is written to the settings file",
+              "look" not in json.load(open(settings_path, encoding="utf-8"))
+              if os.path.isfile(settings_path) else True,
+              open(settings_path).read() if os.path.isfile(settings_path) else "")
         check("starts with 4 voices", app.voice_count() == 4)
         check("one chip row per console and cartridge chip",
               len(app.chip_rects) == 1 + len(chips.EXTENSION_CHANNELS),
@@ -2297,14 +2570,6 @@ def selftest(screenshot: Optional[str] = None) -> int:
               "the cartridge chips)",
               app.voice_count() == all_voices and all_voices == 32,
               "%d, expected %d" % (app.voice_count(), all_voices))
-
-        app.switch_look()
-        check("switching the look works", app.look == "win95", app.look)
-        app.draw()
-        app.switch_look()
-        app.switch_look()
-        check("three looks, back to the tracker", app.look == "tracker", app.look)
-        app.draw()
 
         app.add_demo()
         check("demo queued", len(app.items) == 1)
@@ -2372,9 +2637,9 @@ def selftest(screenshot: Optional[str] = None) -> int:
             app.pattern_column = 0
             app.pattern_row = 0
             app.draw()
-            page = app._layout()[4].inflate(-8, -8)
+            page = app._pattern_page()
             app.mouse = (page.x + 120,
-                         page.y + app.fonts["head"].get_height() + 12 +
+                         page.y + app._pattern_head_height() +
                          app._row_height() * 3 + 8)
             app._pattern_click()
             check("clicking a pattern row plays",
@@ -2542,29 +2807,53 @@ def selftest(screenshot: Optional[str] = None) -> int:
         _selftest_ds_rom(app, check, click)
 
         # A control drawn under a bigger one answers nothing, so every
-        # button and row has to win the click at its own middle — in
-        # each look, because the three paints lay out differently.
-        for key, theme_obj in theme.THEMES.items():
-            app.theme = theme_obj
-            app.look = theme_obj.key
-            app._build_fonts()
-            hidden = unreachable_hits()
-            check("every control answers a click (%s look)" % key,
-                  not hidden, "; ".join(hidden[:3]))
-        app.theme = theme.THEMES["tracker"]
-        app.look = "tracker"
-        app._build_fonts()
+        # button and row has to win the click at its own middle.
+        hidden = unreachable_hits()
+        check("every control answers a click", not hidden, "; ".join(hidden[:3]))
+
+        # ...and the toolbar really is a row of live buttons, not a picture of
+        # one: every button in the strip must be its own control.
+        toolbar = list(app.toolbar_rects)
+        check("the toolbar has its seven buttons", len(toolbar) == 7,
+              "%d buttons: %s" % (len(toolbar), [tuple(r) for r in toolbar]))
+        check("no two toolbar buttons sit on top of each other",
+              len({tuple(rect) for rect in toolbar}) == len(toolbar))
+
+        # --- the window must not stutter: a still desk is not repainted, and a
+        # frame with a song loaded stays well inside one 60 Hz frame.
+        app.draw()
+        app._last_draw = 0.0             # pretend the last paint was long ago
+        app._dirty = False
+        check("a still window has nothing to repaint", app._needs_redraw())
+        app._last_draw = time.time()
+        check("and the very next frame is skipped", not app._needs_redraw())
+        app._dirty = True
+        check("an event still paints it", app._needs_redraw())
+        if app.results:
+            app.draw()
+            started = time.perf_counter()
+            for _frame in range(10):
+                app._body_key = None           # worst case: rebuild the page
+                app.draw()
+            rebuilt = (time.perf_counter() - started) / 10.0 * 1000.0
+            app.draw()
+            started = time.perf_counter()
+            for _frame in range(10):
+                app.draw()                     # the play frame: cached page
+            cached = (time.perf_counter() - started) / 10.0 * 1000.0
+            check("a played-back frame is inside a 60 Hz frame",
+                  cached < 16.0, "%.1f ms" % cached)
+            check("even a full pattern repaint is inside it",
+                  rebuilt < 40.0, "%.1f ms (first paint allowed to be slow)" %
+                  rebuilt)
 
         if screenshot:
             base, extension = os.path.splitext(screenshot)
-            for key, theme_obj in theme.THEMES.items():
-                app.theme = theme_obj
-                app.look = theme_obj.key
-                app._build_fonts()
-                app.draw()
-                target = "%s-%s%s" % (base, key, extension or ".png")
-                pygame.image.save(app.screen, target)
-                check("screenshot written (%s)" % key, os.path.isfile(target))
+            app.draw()
+            target = "%s-%s%s" % (base, app.theme.key, extension or ".png")
+            pygame.image.save(app.screen, target)
+            check("screenshot written (%s)" % app.theme.key,
+                  os.path.isfile(target))
     finally:
         pygame.quit()
 

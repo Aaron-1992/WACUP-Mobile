@@ -34,8 +34,9 @@ jobs:
           python tests/make_test_midi.py tests/genesis-style.mid
           python chip8bit.py --selftest --screenshot window.png
           ls -la window-*.png
-          # all three looks must have rendered, not just the default one
-          test -f window-tracker.png && test -f window-win95.png && test -f window-amiga.png
+          # the one look has to have rendered, and there is no second one any more
+          test -f window-dark.png
+          test ! -e window-win95.png && test ! -e window-amiga.png
 
       - name: Demo renders (all chips, and bare NES)
         working-directory: tools/nes8bit
@@ -70,7 +71,7 @@ jobs:
           mkdir -p release_assets
           cp demo/demo-all-chips.wav demo/demo-bare-nes.wav demo/demo-fast-tune.wav \
              demo/demo-2x-nes-pc-engine.wav demo/demo-pce-only.wav release_assets/
-          cp window-tracker.png window-win95.png window-amiga.png release_assets/
+          cp window-dark.png release_assets/
           ls -la release_assets
 
       - uses: actions/upload-artifact@v4
@@ -128,9 +129,8 @@ jobs:
           "window selftest exit: $($gui.ExitCode)"
           Get-ChildItem .\window-*.png | Format-Table Name, Length
           if ($gui.ExitCode -ne 0) { throw "chip8bit.exe --selftest exited $($gui.ExitCode)" }
-          if (-not (Test-Path .\window-tracker.png)) { throw "the window never drew a frame" }
-          if (-not (Test-Path .\window-win95.png)) { throw "the Windows 95 look vanished" }
-          if (-not (Test-Path .\window-amiga.png)) { throw "the Amiga look vanished" }
+          if (-not (Test-Path .\window-dark.png)) { throw "the window never drew a frame" }
+          if (Test-Path .\window-win95.png) { throw "the retired Windows 95 look is back" }
 
           # the console build still does the classic command line job
           $out = & ".\dist\chip8bit-cli.exe" --cli tests\genesis-style.mid --extensions all --stats 2>&1 | Out-String
@@ -276,12 +276,15 @@ jobs:
             `demo-*.wav` are the built-in test tune on the bare NES, on the console
             with every extension chip enabled, on two NES APUs plus a PC Engine, and
             on a PC Engine **with the NES switched off** (`--no-nes --extensions pce`):
-            six PC Engine voices and nothing else. `window-tracker.png`,
-            `window-win95.png` and `window-amiga.png` are real screenshots of the
-            three looks. The default window is a FastTracker II desk: blue frame,
-            lavender buttons, waveform scopes for every voice, and the pattern page
-            with note / instrument / volume in hex and row numbers every four
-            channels. The look button cycles between the three.
+            six PC Engine voices and nothing else. `window-dark.png` is a real
+            screenshot of the window: one flat dark tracker desk, channel meters for
+            every voice, a toolbar instead of a button grid, and the pattern page with
+            note / instrument / volume in hex and row numbers every four channels. The
+            three skins are gone — there is one look, it is dark, and nothing switches
+            it. Frames are also cheap now: the pattern rows and the meters are painted
+            once and kept, and the window only repaints when something changed, so a
+            three-minute tune that used to sit at 19 ms a frame stays under 5 ms with
+            no spikes.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe
@@ -297,8 +300,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -e
-          for name in chip8bit.exe chip8bit-cli.exe window-tracker.png \
-                      window-win95.png window-amiga.png \
+          for name in chip8bit.exe chip8bit-cli.exe window-dark.png \
                       demo-all-chips.wav demo-bare-nes.wav demo-fast-tune.wav \
                       demo-2x-nes-pc-engine.wav demo-pce-only.wav; do
             size=$(gh release view chip8bit-latest --json assets \

@@ -3,11 +3,11 @@
 Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs**, or a
 `.zip` of them) and re-composes them for the NES sound chip, then renders 8-bit audio.
 
-* **its own window, in 1995** — a FastTracker II desk: a thin blue window edge, one
-  lavender surface with every panel cut into it, per-channel waveform scopes, and the
-  pattern page with row numbers down the side of every four channels and hex
-  note/instrument/volume columns. Windows 95 and Amiga Workbench looks are one click
-  away; no browser, no server, no install;
+* **its own window, a tracker desk in dark** — one flat near-black desk, hairline
+  borders, one mint accent, monospaced text: a pattern page with row numbers down the
+  side of every four channels and hex note/instrument/volume columns, channel meters
+  across the top and a toolbar under them. No bevels, no skins, one look; no browser,
+  no server, no install;
 * **it reads the MIDI before it converts it** — tracks are split into monophonic
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
@@ -34,11 +34,13 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
 
 ## The window
 
-![the chip8bit window, FastTracker II look](docs/window-tracker.png)
+![the chip8bit window](docs/window-dark.png)
 
 Double-click **`chip8bit.exe`**. Its own window opens (pygame/SDL — a normal desktop
-window, no browser anywhere), laid out like FastTracker II v2.04: one lavender desk
-with the panels **cut into** it, so nothing floats on a coloured background.
+window, no browser anywhere), laid out like a tracker: the live numbers and the
+toolbar across the top, the pattern page as the biggest thing on the desk, the chips
+and the file list down the right. It is painted once, dark — near-black panels, single
+hairline borders, no bevels or grooves anywhere.
 
 ![the desk with a second NES and a PC Engine switched on](docs/window-consoles.png)
 
@@ -53,11 +55,11 @@ with the panels **cut into** it, so nothing floats on a coloured background.
    second APU) and `PC ENGINE` — and the rest are the cartridge chips. Clicking
    `NES` off leaves the others playing on their own: `PC ENGINE` alone is a PC
    Engine, six voices, no APU. A console has to stay on, so the last one cannot be
-   switched off — the status line says why instead of leaving you with nothing. `VOICES` and `CHIPS` in the header
-   follow along (4 → 32 voices) and their arrows add or drop one chip, while `BITS`
-   picks 8 or 16 and `RATE` walks 22k / 32k / 44k / 48k / 96k. Every spinner in the
-   header is a control that does what its number says. The choice is remembered
-   between runs.
+   switched off — the status line says why instead of leaving you with nothing.
+   `VOICES` and `CHIPS` in the top strip follow along (4 → 32 voices) and their
+   arrows add or drop one chip, while `BITS` picks 8 or 16 and `RATE` walks 22k /
+   32k / 44k / 48k / 96k. Every spinner in the top strip is a control that does what
+   its number says. The choice is remembered between runs.
 3. **Convert** — press *CONVERT*. The button counts what is waiting (`CONVERT 3`)
    and the list keeps you posted, one row per file:
 
@@ -79,9 +81,9 @@ with the panels **cut into** it, so nothing floats on a coloured background.
    output folder in Explorer. The files are already on disk in that folder — saving
    a copy elsewhere is optional.
 
-`WHAT I FOUND` in the header shows the analysis of the selected song: the
-instruments it identified, how the tracks were split into voices, and
-`2980 notes kept · 6 left out`.
+The strip under the toolbar shows the analysis of the selected song: the instruments
+it identified, how the tracks were split into voices, and the totals on the right —
+`2980 KEPT · 6 OUT`.
 
 ### The pattern page
 
@@ -91,7 +93,7 @@ a mock-up:
 * one column per voice: `PU1 PU2 TRI NOI` and, with chips on, `V6-1 V6-2 V6S M5-1
   M5-2 FDS N1…N8 PSG1..3 DMC`;
 * `note · instrument · volume` in hex, the tracker layout (`C-4 50 33`);
-* row numbers `00`…`3F` repeated at the head of every four channels, with blue gaps
+* row numbers `00`…`3F` repeated at the head of every four channels, with a dark gap
   between the groups, every fourth row striped, and the playing row highlighted and
   scrolled into view;
 * the info line: `PAT 00:12  TIME 12.4s / 153.0s  BPM 226  14 VOICES` — and if two
@@ -101,15 +103,22 @@ a mock-up:
   the rows, Shift+wheel or ←/→ the channels, and a long song gets a page list down
   the right edge.
 
-### The three looks
+### One look, and it is dark
 
-The look button cycles **FT2 (FastTracker II, the default) → Windows 95 → Amiga
-Workbench**. Same geometry, same panels, three very different wardrobes; the choice
-is remembered.
+There used to be three skins — a lavender FastTracker II desk, a Windows 95 bevel
+fest and an Amiga Workbench one — and a `LOOK` button that cycled them. They are
+gone: one dark desk, FamiTracker's layout, and nothing to switch. A settings file
+from an older build that still says `"look": "win95"` is read and the key ignored, so
+an upgrade cannot put the bevels back on screen.
 
-| FT2 (default) | Windows 95 | Amiga Workbench |
-| --- | --- | --- |
-| ![FT2 look](docs/window-tracker.png) | ![Windows 95 look](docs/window-win95.png) | ![Amiga look](docs/window-amiga.png) |
+The same pass is what stopped the stutter. A frame used to be repainted sixty times
+a second whether or not anything had changed, the pattern page walked every note of
+the song three times per frame, and every scrollbar built a font object per draw. Now
+the pattern rows, the channel meters and every repeated string are rendered once and
+kept, the window only repaints when something actually happened (or while music plays
+or a batch runs), and the garbage collector is left alone long enough that it no
+longer stops the window mid-frame. On a three-minute, 1890-note file a frame went
+from 19 ms to about 4 ms, with no frame over 16 ms in a 600-frame run.
 
 Everything happens on your machine; nothing is uploaded and no port is opened.
 

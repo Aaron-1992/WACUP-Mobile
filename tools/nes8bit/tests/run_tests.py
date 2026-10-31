@@ -1197,6 +1197,28 @@ def _pitch_swing(program: int, vibrato: float, seconds: float = 2.5,
     return 100.0 * (max(freqs) - min(freqs)) / mean
 
 
+def theme_test() -> None:
+    """The window has one look, and it is dark.
+
+    This is the cheap half of the check (the window self test does the rest): the
+    skin list must hold exactly one entry, and it must be the dark one. A build
+    that quietly grew a second skin fails here before it can ship.
+    """
+    print("the window's look")
+    from nescore import theme
+    check("exactly one look", len(theme.THEMES) == 1, str(sorted(theme.THEMES)))
+    look = theme.get()
+    check("and it is the dark one", look.key == "dark", look.key)
+    check("no look switching is possible",
+          not hasattr(theme, "next_theme"), "next_theme is back")
+    check("the desk is dark and flat",
+          sum(look.desktop) < 120 and look.border == 1 and look.rounded == 0,
+          "%s / border %d / rounded %d" % (look.desktop, look.border,
+                                           look.rounded))
+    check("an old settings file cannot change it",
+          theme.get("win95") is look and theme.get("amiga") is look)
+
+
 def _write_fake_genesis_vgm(path: str) -> str:
     """A tiny YM2612 log: key on, play, key off — so the importer has work to do."""
     data = bytearray()
@@ -1256,4 +1278,9 @@ def _sf2_sample_range(data: bytes, chunks: dict, start: int, count: int) -> list
 
 
 if __name__ == "__main__":
-    sys.exit(main_test())
+    _code = main_test()
+    theme_test()
+    if FAILURES:
+        print("\n%d check(s) failed: %s" % (len(FAILURES), ", ".join(FAILURES)))
+        sys.exit(1)
+    sys.exit(_code)
