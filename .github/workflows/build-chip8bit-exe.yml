@@ -229,6 +229,19 @@ jobs:
             `<song>.sf2`, the bank's instruments and samples as a real SoundFont.
             Nothing is bundled or downloaded; every byte comes out of your ROM.
 
+            A whole soundtrack is one command, on the bare NES (the default — no
+            chips to switch on):
+
+            ```
+            chip8bit-cli.exe --cli game.nds --all-songs --wav-only -o "8-bit"
+            ```
+
+            One `<rom> <song> [nes].wav` per song, named the way the game named it,
+            with no `.mid`/`.sf2` clutter. Drums are found in the bank too: the
+            instrument with one wave per key is the kit, so percussion lands on the
+            noise channel as kick/snare/hat instead of being mistaken for a bass
+            line and played on the triangle.
+
             **A second NES and a PC Engine.** Two of the switches are not cartridge
             chips but whole other consoles playing along: `2x NES` doubles the APU
             (4 → 8 voices), and `PC Engine` adds Hudson's HuC6280 — six channels,

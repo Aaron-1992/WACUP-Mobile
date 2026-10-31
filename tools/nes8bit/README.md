@@ -224,7 +224,9 @@ music and the instrument bank out of it, then converts the song like any other f
 * **two files are written next to the `.wav`** — `<song>.mid` (a real Standard MIDI
   File, format 1, 48 ticks per quarter, the DS's own grid) and `<song>.sf2` (a real
   SoundFont 2 with the bank's instruments and its samples, so the same music can be
-  played or edited outside this tool).
+  played or edited outside this tool). `--wav-only` turns both off;
+* **the kit is found in the bank** — the instrument with one wave per key is the
+  drum kit, and its notes become percussion instead of a bass line (see below).
 
 ![the song browser over the desk](docs/window-songs.png)
 
@@ -250,13 +252,45 @@ chip8bit-cli.exe --cli rom.nds --all-songs --stats
 ```
 
 `--all-songs` converts the whole soundtrack in one go, each song into its own
-`.wav`, `.mid` and `.sf2`. `--sequence` takes a name fragment or a number as
+`.wav`, `.mid` and `.sf2` (`--wav-only` leaves just the audio). `--sequence` takes a name fragment or a number as
 `--list-songs` prints it (the
 archive's own index, counting from 0); `--bank` overrides the bank the song asks for.
 The window numbers the same songs from 1, the way a person counts them.
 
 **Nothing is bundled and nothing is downloaded.** Every byte written comes out of the
-file you opened; the project ships no game data.
+file you opened; the project ships no game data. Converting a soundtrack needs your
+own copy of the game.
+
+### A whole soundtrack on the bare NES
+
+The plain four-voice 2A03 is the default, so a DS soundtrack turned into 8-bit music
+is one command — no chips to switch on:
+
+```
+chip8bit-cli.exe --cli "New Super Mario Bros.nds" --all-songs --wav-only -o "NSMB 8-bit"
+```
+
+That writes one `<rom> <song> [nes].wav` per song, named the way the game named it
+(`NSMB 8-bit\New Super Mario Bros BGM_OVERWORLD [nes].wav`), and nothing else:
+`--wav-only` skips the `.mid` and `.sf2` extras, which are useful for one song and
+just clutter for thirty. Drop `--wav-only` if you want the extracted MIDI/SoundFont
+as well. In the window it is *ADD MUSIC* on the ROM, then *ADD ALL SONGS*, then
+*CONVERT* — the chips box stays on `01 NES`.
+
+On the machine this was built on, a 22-song test soundtrack converted in 25 seconds
+and a 3-minute song takes about 40. Each song is a normal `--stats` run if you want
+to see what was kept.
+
+**Drums come from the bank.** A DS bank does not label its percussion, so a drum
+track is otherwise just "short low notes in the bass register" — it gets classified
+as a bass line, played on the triangle, and the real bass loses its channel (drums
+turn into a bass riff, which is the single worst thing that can happen to a
+conversion). The reader now looks for the kit itself: the instrument type with one
+voice per key, a *different* wave on every key, and a plain PSG-noise instrument.
+Those notes are marked as drums, so they land on the noise channel as kick, snare
+and hat. If a game's kit is laid out somewhere other than the General MIDI range, its
+keys are mapped by key order onto the usual pieces (bass drum at the bottom, then
+snare, hats, toms, cymbals) and the conversion says how many drum notes it found.
 
 What carries across exactly: notes, timing, tempo, per-track volume, transpose,
 program changes, key ranges, root keys, pans, sample rates, loop points, and the

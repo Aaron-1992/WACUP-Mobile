@@ -633,6 +633,7 @@ class Zone:
     release: int = 127
     pan: int = 64
     psg: bool = False         # a square/noise voice: no sample behind it
+    kind: int = 0             # the SBNK instrument type it came from
 
 
 def read_bank(sbnk: bytes, wave_archive: int = 0) -> List[List[Zone]]:
@@ -708,6 +709,66 @@ def _read_instrument(data: bytes, kind: int, at: int,
             position += 0xC
             low = end + 1
     return zones
+
+
+#: GM drum pieces, low to high. A kit whose keys are not laid out like GM's is
+#: mapped by key order onto these, which is how such kits are normally arranged
+#: (bass drum at the bottom, then snare, hats, toms, cymbals).
+_GM_PIECES = [36, 38, 42, 45, 49, 41, 47, 51, 39, 43, 46, 54]
+
+
+def drum_programs(sbnk: bytes, wave_archive: int = 0) -> Dict[int, List[int]]:
+    """Which instruments in a bank are drum kits, and what keys they use.
+
+    A DS bank does not label its drums, but it does show them: a kit is the
+    "one sample per key over a range" instrument type, with a *different* wave on
+    every key — that is the whole point of a kit, one sample per piece. A
+    multisampled flute has the same wave on several keys, so it is not one. A
+    plain noise instrument (PSG noise) is percussion too.
+    """
+    kits: Dict[int, List[int]] = {}
+    try:
+        instruments = read_bank(sbnk, wave_archive)
+    except Exception:
+        return kits
+    for slot, zones in enumerate(instruments):
+        if not zones:
+            continue
+        keys = sorted(zone.low for zone in zones if zone.low == zone.high)
+        waves = {zone.wave for zone in zones if zone.low == zone.high}
+        if len(keys) >= 6 and len(waves) >= 6:
+            kits[slot] = keys
+        elif all(zone.psg for zone in zones) and any(
+                zone.kind == 3 for zone in zones):
+            # a pure noise instrument: snare/hat duties
+            kits[slot] = list(range(35, 50))
+    return kits
+
+
+def mark_percussion(song: Song, kits: Dict[int, List[int]]) -> int:
+    """Give drum tracks their role, using what the bank says they are.
+
+    Without this a DS drum track is just "short low notes in the bass register",
+    so it is classified as a bass line and played on the triangle: the drums turn
+    into a bass riff and the real bass loses its channel. Returns how many notes
+    were marked.
+    """
+    if not kits:
+        return 0
+    marked = 0
+    for note in song.notes:
+        keys = kits.get(note.program)
+        if not keys or note.pitch not in keys:
+            continue
+        note.role = "drum"
+        # a kit laid out somewhere other than GM's range still has to land on the
+        # pieces the converter knows, so map it by key order
+        in_range = sum(1 for key in keys if 35 <= key <= 81)
+        if in_range * 2 < len(keys):
+            rank = keys.index(note.pitch)
+            note.pitch = _GM_PIECES[rank % len(_GM_PIECES)]
+        marked += 1
+    return marked
 
 
 def read_wave_archive(swar: bytes) -> Dict[int, dict]:
@@ -1097,6 +1158,15 @@ def load_bytes(data: bytes, path: str = "", sequence: str = "",
         chosen_bank = asked_for
     if not (0 <= chosen_bank < len(archive.banks)) and archive.banks:
         chosen_bank = 0
+    if 0 <= chosen_bank < len(archive.banks):
+        bank_entry = archive.banks[chosen_bank]
+        kits = drum_programs(bank_entry.sbnk,
+                             bank_entry.wave_archives[0]
+                             if bank_entry.wave_archives else 0)
+        marked = mark_percussion(song, kits)
+        if marked:
+            song.add_warning("%d drum notes found in the bank's kit instruments"
+                             % marked)
     return song, archive, entry, chosen_bank
 
 

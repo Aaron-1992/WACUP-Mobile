@@ -142,6 +142,76 @@ def build_sbnk() -> bytes:
     return bytes(data)
 
 
+def build_kit_sbnk(keys=range(36, 48)) -> bytes:
+    """A bank with a drum kit: one instrument whose every key has its own wave.
+
+    That is how a DS game stores its kit (one sample per piece), and it is the
+    only thing in the bank that says "these are drums" — so the reader has to
+    recognise it from the layout.
+    """
+    keys = list(keys)
+    multisample = bytes([40, 43]) + b"".join(
+        _typed_definition(1, 0, 60) for _ in keys[:4])   # four keys, one wave
+    kit = bytes([keys[0], keys[-1]]) + b"".join(
+        _typed_definition(index, 0, 60) for index, _key in enumerate(keys))
+    header = 0x3C + 128 * 4
+    blob = bytearray()
+    offsets = []
+    for chunk in (multisample, kit):
+        offsets.append(header + len(blob))
+        blob += chunk
+    total = header + len(blob)
+    data = bytearray()
+    data += _std_header(b"SBNK", total)
+    data += b"DATA" + struct.pack("<I", total - 0x10) + b"\x00" * 32
+    data += struct.pack("<I", 128)
+    for slot in range(128):
+        if slot == 0:
+            data += struct.pack("<BHB", 16, offsets[0], 0)
+        elif slot == 9:
+            data += struct.pack("<BHB", 16, offsets[1], 0)
+        else:
+            data += struct.pack("<BHB", 0, 0, 0)
+    data += blob
+    return bytes(data)
+
+
+def build_drum_sseq() -> bytes:
+    """One melody track and one drum track that uses instrument 9's kit."""
+    header_size = 0x1C
+    tempo = bytearray([0xFE, 0x07, 0x00]) + bytes([0xE1]) + \
+        struct.pack("<H", 140) + bytes([0xFF])
+    melody = bytearray([0x81, 0, 0xC1, 100])
+    for pitch in (72, 74, 76, 79):
+        melody += bytes([pitch, 100]) + _vlq(48)
+    melody += bytes([0x94, 0x00, 0x00, 0x00, 0xFF])
+    drums = bytearray([0x81, 9])
+    for pitch in (36, 42, 38, 42) * 6:
+        drums += bytes([pitch, 100]) + _vlq(24)
+    drums += bytes([0xFF])
+    tempo_offset = 3 * 5
+    melody_offset = tempo_offset + len(tempo)
+    drum_offset = melody_offset + len(melody)
+    definitions = bytearray()
+    for number, offset in ((0, tempo_offset), (1, melody_offset),
+                           (2, drum_offset)):
+        definitions += bytes([0x93, number, offset & 0xFF, (offset >> 8) & 0xFF,
+                              (offset >> 16) & 0xFF])
+    body = bytes(definitions) + bytes(tempo) + bytes(melody) + bytes(drums)
+    total = header_size + len(body)
+    data = bytearray(_std_header(b"SSEQ", total))
+    data += b"DATA" + struct.pack("<II", total - 0x10, header_size)
+    data += body
+    return bytes(data)
+
+
+def write_kit_rom(path: str) -> str:
+    """A ROM whose soundtrack has one song playing a real drum kit."""
+    sdat = build_sdat(sequences=[("BGM_KIT", build_drum_sseq())],
+                      sbnk=build_kit_sbnk())
+    return build_rom(path, sdat)
+
+
 # ---------------------------------------------------------------------- waves
 
 def _swav(pcm: bytes, wave_type: int, rate: int, looped: bool = False,

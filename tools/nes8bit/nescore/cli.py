@@ -206,9 +206,10 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
     stem_of_source = os.path.splitext(os.path.basename(target))[0]
     if " [" in stem_of_source:                 # drop the chip tag from the name
         stem_of_source = stem_of_source.rsplit(" [", 1)[0]
-    for extra in importers.extract_assets(
-            source, os.path.dirname(target) or ".", stem_of_source):
-        print("  + %s" % extra)
+    if not args.wav_only:                      # a soundtrack wants just the WAVs
+        for extra in importers.extract_assets(
+                source, os.path.dirname(target) or ".", stem_of_source):
+            print("  + %s" % extra)
 
     if args.export_vgm:
         vgm_target = os.path.splitext(target)[0] + ".vgm"
@@ -300,6 +301,9 @@ def main(argv=None) -> int:
                              "the one the song asks for)")
     parser.add_argument("--list-songs", action="store_true",
                         help="list the songs inside a DS ROM and stop")
+    parser.add_argument("--wav-only", action="store_true",
+                        help="do not write the .mid and .sf2 that a DS ROM can "
+                             "also give up — the audio is all you get")
     parser.add_argument("--all-songs", action="store_true",
                         help="convert every song of a DS ROM, each into its own "
                              "files")

@@ -976,6 +976,34 @@ def main_test() -> None:
           boss_result.ok and main_result.ok,
           "%s / %s" % (boss_result.error, main_result.error))
 
+    print("DS drums (the bank says which instruments are kits)")
+    kit_rom = make_test_rom.write_kit_rom(os.path.join(work, "kit.nds"))
+    kit_song, kit_archive, _kit_entry, kit_bank = nds.load(kit_rom)
+    kit_note = [note for note in kit_song.notes if note.role == "drum"]
+    check("a kit instrument is recognised as drums", len(kit_note) == 24,
+          "%d drum notes" % len(kit_note))
+    check("a multisample next to it is not", sum(
+        1 for note in kit_song.notes if note.role != "drum") == 4,
+        str(sorted({note.role for note in kit_song.notes})))
+    kit_voices = analyze.analyse(kit_song)
+    check("and the drum track is its own voice",
+          any(voice.role == "drum" for voice in kit_voices.voices),
+          str([voice.role for voice in kit_voices.voices]))
+    kit_notes, _kit_stats = arrange(kit_song, chips.build_channel_set([], True),
+                                    Options(), analysis=kit_voices)
+    check("the kit lands on the noise channel, not the triangle",
+          kit_notes and all(note.channel == "noise" for note in kit_notes
+                            if note.role == "drum"),
+          str(sorted({note.channel for note in kit_notes
+                      if note.role == "drum"})))
+    check("and the pieces are named",
+          {note.drum for note in kit_notes if note.role == "drum"} >=
+          {"kick", "snare", "hat"},
+          str({note.drum for note in kit_notes if note.role == "drum"}))
+    check("the melody still gets a pulse",
+          any(note.channel == "pulse1" for note in kit_notes if
+              note.role == "melody"), str(kit_notes))
+
     print("DS sequence reader: commands, banks, loops")
     plain = nds.read_sequence(make_test_rom.build_sseq())
     extra = bytes([0xB0, 0x00, 0x10, 0x00,          # variable = 0x0010
@@ -1028,6 +1056,14 @@ def main_test() -> None:
     check("cli wrote a wav and a vgm",
           len(vgm_files) == 2 and any(n.endswith(".vgm") for n in vgm_files)
           and any(n.endswith(".wav") for n in vgm_files), str(vgm_files))
+
+    waves_only = os.path.join(work, "cli-wav-only")
+    code = main([two_songs, "--all-songs", "--wav-only", "-o", waves_only])
+    only = sorted(os.listdir(waves_only)) if os.path.isdir(waves_only) else []
+    check("--wav-only leaves nothing but audio",
+          code == 0 and only and all(name.endswith(".wav") for name in only),
+          str(only))
+    check("and one file per song of the ROM", len(only) == 2, str(only))
 
     bad = os.path.join(work, "broken.mid")
     with open(bad, "wb") as handle:
