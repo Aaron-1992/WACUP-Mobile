@@ -386,6 +386,8 @@ console to fit them into. The file is called `… [ds].wav`, not `… [nes].wav`
 the window says **NO CHIP** while it is on: this is the soundtrack, not a cover of
 it, and it would be dishonest to name it as a conversion.
 
+![the samples row on: no chip, and the columns are the archive's own tracks](docs/window-samples.png)
+
 Measured, on a test bank whose one instrument is a seamless looped sine: a note at
 its recorded pitch comes out at exactly the sample's own frequency (500.0 Hz for a
 500 Hz tone), an octave up comes out at exactly twice it (1000.0 Hz), the note holds

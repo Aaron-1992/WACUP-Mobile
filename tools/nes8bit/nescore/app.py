@@ -103,6 +103,8 @@ def _channel_short(channel: str) -> str:
         return "N" + channel[5:]
     if channel.startswith("psg"):
         return "PSG" + channel[3:]
+    if channel.startswith("trk"):          # sampled mode: the archive's own track
+        return channel.upper()
     return channel[:4].upper()
 
 
@@ -1920,10 +1922,17 @@ class App:
             box = pygame.Rect(x - 2, strip.y + 2, cell - 4, strip.height - 4)
             self.screen.fill(t.field, box)
             theme.sunken(self.screen, box, t, 1)
+            label = _channel_short(channels[index])
+            if label.startswith("TRK"):
+                # a track is named, not numbered: "TRK 02" is what the archive
+                # calls it, and a second column number beside it says nothing
+                only = self.fonts["head"].render(label, t.smooth, t.pattern_inst)
+                self.screen.blit(only, (box.x + 5,
+                                        box.centery - only.get_height() // 2))
+                continue
             number = self.fonts["head"].render("%02d" % (index + 1), t.smooth,
                                                t.field_text)
-            name = self.fonts["head"].render(_channel_short(channels[index]),
-                                             t.smooth, t.pattern_inst)
+            name = self.fonts["head"].render(label, t.smooth, t.pattern_inst)
             self.screen.blit(number, (box.x + 5, box.centery - number.get_height() // 2))
             self.screen.blit(name, (box.right - name.get_width() - 5,
                                     box.centery - name.get_height() // 2))
@@ -2265,9 +2274,9 @@ class App:
                 self.screen.blit(clock, (row.right - clock.get_width() - 4,
                                          row.y + 3))
             if result.ok and getattr(result, "samples_mode", False):
-                line = "%d track%s · %d note%s · own samples" % (
-                    result.voices, "" if result.voices == 1 else "s",
-                    result.kept, "" if result.kept == 1 else "s")
+                line = "%d note%s on %d track%s" % (
+                    result.kept, "" if result.kept == 1 else "s",
+                    result.voices, "" if result.voices == 1 else "s")
             elif result.ok:
                 line = "%d voices · %d kept · %d out" % (
                     result.voices, result.kept, result.left_out)
