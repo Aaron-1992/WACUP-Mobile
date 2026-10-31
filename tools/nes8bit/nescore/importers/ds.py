@@ -108,6 +108,21 @@ def songs(path: str):
     return catalogue(path)["songs"]
 
 
+def bank_of(path: str):
+    """(archive, bank index) for a DS file, so its own samples can be played.
+
+    ``None`` for anything that is not a DS file, which is what the sampled mode
+    needs to hear: a MIDI file has no bank to take samples from.
+    """
+    if _LAST is not None and _LAST[0] == path:
+        return _LAST[1], _LAST[3]
+    try:
+        _song, archive, _entry, bank = nds.load(path)
+    except nds.NdsError:
+        return None
+    return archive, bank
+
+
 def song_lengths(path: str):
     """How long each song is and how many notes it has: {index: (s, notes, why)}."""
     return catalogue(path, length=True)["lengths"]

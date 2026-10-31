@@ -1327,11 +1327,40 @@ def recognition_test() -> None:
     pattern page.
     """
     import make_test_rom as rom_tools
-    from nescore import nds
+    from nescore import nds, sampled
     from nescore.demo import Track, BEAT, BAR, DIVISION
 
     def analyse_and_name(song):
         return analyze.analyse(song)
+
+    def _samples(rendered):
+        """The render's audio as one channel of floats — measurements need that."""
+        import numpy
+        data = numpy.frombuffer(rendered.pcm, dtype="<i2").astype(float)
+        if rendered.channels == 2:
+            data = data.reshape(-1, 2).mean(axis=1)
+        return data
+
+    def _dominant_hz(rendered):
+        """The strongest frequency of a rendered note, measured, not assumed."""
+        import numpy
+        data = _samples(rendered)
+        start = int(0.15 * rendered.rate)
+        window = data[start:start + 16384]
+        if not len(window):
+            return 0.0
+        spectrum = numpy.abs(numpy.fft.rfft(window * numpy.hanning(len(window))))
+        freqs = numpy.fft.rfftfreq(len(window), 1.0 / rendered.rate)
+        return float(freqs[int(numpy.argmax(spectrum))])
+
+    def _loudness(rendered, at_seconds):
+        import numpy
+        data = _samples(rendered)
+        start = int(at_seconds * rendered.rate)
+        window = data[start:start + 1024]
+        if not len(window):
+            return 0.0
+        return float(numpy.sqrt((window ** 2).mean())) / 32768.0
 
     work = tempfile.mkdtemp(prefix="chip8bit-recog-")
     print("finding the songs in a ROM with two sound archives")
@@ -1390,6 +1419,65 @@ def recognition_test() -> None:
     check("a note whose instrument has no sample behind it keeps the old rules",
           nds.mark_timbres(nds.read_sequence(rom_tools.build_sseq()), sound_archive,
                            0) == 0)
+
+    print("playing the game's own instruments")
+    tone_rom = rom_tools.build_tone_rom(os.path.join(work, "tone.nds"),
+                                       root=60, pitch=60, rate=16000)
+    tone_archive, _title = nds.open_archive(tone_rom)
+    tone_song = nds.read_sequence(tone_archive.find_sequence("TONE").sseq)
+    check("the tone ROM holds one long note",
+          len(tone_song.notes) == 1 and tone_song.notes[0].pitch == 60,
+          str([(n.start, n.dur, n.pitch) for n in tone_song.notes]))
+
+    tone = sampled.render_song(tone_song, tone_archive, 0,
+                               sampled.SampleOptions(rate=32768, stereo=True))
+    check("nothing is skipped when the bank has the instrument",
+          tone.notes_played == 1 and tone.notes_skipped == 0,
+          "%d played, %d skipped" % (tone.notes_played, tone.notes_skipped))
+    check("a note at its recorded pitch plays at its recorded rate",
+          abs(_dominant_hz(tone) - 500.0) < 6.0,
+          "%.1f Hz (expected 500)" % _dominant_hz(tone))
+    # an octave up is exactly twice the pitch — this is what "the wrong key"
+    # would look like if the resampling were sloppy
+    octave_rom = rom_tools.build_tone_rom(os.path.join(work, "octave.nds"),
+                                          root=60, pitch=72, rate=16000)
+    octave_archive, _title = nds.open_archive(octave_rom)
+    octave = sampled.render_song(
+        nds.read_sequence(octave_archive.find_sequence("TONE").sseq),
+        octave_archive, 0, sampled.SampleOptions(rate=32768, stereo=True))
+    check("an octave above is twice the frequency",
+          abs(_dominant_hz(octave) - 1000.0) < 12.0,
+          "%.1f Hz (expected 1000)" % _dominant_hz(octave))
+    check("the note sustains for its whole length, not just its attack",
+          _loudness(tone, 0.2) > 0.4 * _loudness(tone, 0.01),
+          "%.3f at 0.2 s vs %.3f at 0.01 s" % (_loudness(tone, 0.2),
+                                               _loudness(tone, 0.01)))
+    # the note is four seconds long, so it must be silent just past its end and
+    # still be singing just before it
+    check("and it stops where the note stops",
+          _loudness(tone, 4.03) < 0.15 * _loudness(tone, 2.0),
+          "%.3f at 4.03 s vs %.3f at 2.0 s" % (_loudness(tone, 4.03),
+                                               _loudness(tone, 2.0)))
+
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        code = main([tone_rom, "--samples", "--diagnose", "-o",
+                     os.path.join(work, "sampled-out")])
+    said = printed.getvalue()
+    check("--samples converts without a chip", code == 0 and "[ds]" in said,
+          said[-300:])
+    check("the file is named as a sampled render, not as a conversion",
+          os.path.isfile(os.path.join(work, "sampled-out", "tone [ds].wav")),
+          str(sorted(os.listdir(os.path.join(work, "sampled-out"))
+                     if os.path.isdir(os.path.join(work, "sampled-out")) else [])))
+    check("and it says plainly that no chip was involved",
+          "no chip is involved" in said, said[-300:])
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        code = main(["/tmp/does-not-matter.mid", "--samples"])
+    check("a file with no bank is refused instead of faked",
+          code == 1 or "Nintendo DS" in printed.getvalue(),
+          printed.getvalue()[-200:])
 
     print("telling drums from music")
 

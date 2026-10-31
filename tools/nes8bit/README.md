@@ -30,7 +30,11 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
   notes; they are given the shortest length the chip can actually articulate
   instead of being thrown away as "too short";
 * **a mix, not a pile** — the melody sits on top, the bass under it, the chord bed
-  under both, and no more than a handful of duplicate lines play at once.
+  under both, and no more than a handful of duplicate lines play at once;
+* **and the other answer, for a DS ROM** — `--samples` (or the samples row under the
+  chips) stops converting and simply plays the archive's own instruments at once:
+  the soundtrack as the game plays it, named `[ds]` and labelled *no chip*, so you can
+  hear the original next to any conversion of it.
 
 ## The window
 
@@ -137,6 +141,11 @@ chip8bit-cli.exe --cli --list-extensions
 is a PC Engine on its own (six voices, `song [pce].wav`); with `--extensions dual`
 it is the second APU alone (`song [dual].wav`); with no console left over the run
 is refused and says so.
+
+`--samples` is the one mode that is not a conversion: on a DS ROM it plays the
+archive's own instruments (see "Playing the game's own instruments"), names the file
+`[ds]`, and says so; on anything else it stops and tells you that a game's own
+samples only exist in a DS file. `--sequence NAME` and `--bank N` pick the song.
 
 `--bits 8` gives you the crunch; the default is 16-bit. `--stereo` writes two
 channels, and with a PC Engine in the console it is real stereo: the chord and
@@ -358,6 +367,40 @@ instruments some banks mix in (square/noise types, which have no sample behind t
 and streamed music (`STRM`), which is not part of an SDAT. The converter itself does
 not need any of that: it re-composes the notes onto the NES's own voices, which is
 the whole point of the tool.
+
+### Playing the game's own instruments
+
+There is one mode that does not convert at all. A DS bank *is* a set of samples with
+a pitch, a loop point and a volume envelope on each of them, and the soundtrack is
+already written for them — so it can simply be played:
+
+```
+chip8bit-cli.exe --cli "New Super Mario Bros.nds" --sequence BGM_CHIJO --samples
+```
+
+or the **THE GAME'S OWN SAMPLES** row under the chips in the window. Every note
+becomes the archive's own SWAV, read back at `2^((note-root)/12)` of its recorded
+rate, looped where the sample loops, shaped by the bank's ADSR bytes, panned where
+the bank pans it. All the tracks play at once, because there is no four-voice
+console to fit them into. The file is called `… [ds].wav`, not `… [nes].wav`, and
+the window says **NO CHIP** while it is on: this is the soundtrack, not a cover of
+it, and it would be dishonest to name it as a conversion.
+
+Measured, on a test bank whose one instrument is a seamless looped sine: a note at
+its recorded pitch comes out at exactly the sample's own frequency (500.0 Hz for a
+500 Hz tone), an octave up comes out at exactly twice it (1000.0 Hz), the note holds
+until the note ends and stops within its release after that. Rendering runs at the
+DS's own 32768 Hz, so a note at its recorded pitch is a straight copy of the sample
+with no resampling error at all.
+
+What it is not: bit-exact hardware. The bank's ADSR bytes are rates against the
+DS's own curve table; they are mapped to times here, which gets the shape right
+(a 1 ms attack or a 300 ms one, a decay to a sustain level, a release) without
+pretending the curve is identical. The PSG instruments some banks mix in have no
+sample behind them, so those notes are played as the square they are. The chips are
+drawn as out of use while this mode is on and their rows take no clicks, because a
+conversion and the original cannot both be the answer; switch the samples off and
+the chips you had chosen come back exactly as they were.
 
 ## What "understanding the MIDI" means here
 
@@ -587,6 +630,10 @@ What to do with it:
 * **The loop is not played.** A DS sequence that loops forever is rendered once,
   from the top to the loop point, so a 40-second song is 40 seconds and not four
   minutes of the same phrase.
+* **`--samples`** is the other answer: no conversion, no chip, the game's own
+  instruments (see "Playing the game's own instruments" above). If a song still does
+  not sound like itself after all of the above, that mode exists precisely so you
+  can hear what the ROM actually plays and judge the conversion against it.
 
 ## Honest limits
 

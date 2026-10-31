@@ -222,6 +222,76 @@ def write_kit_rom(path: str) -> str:
     return build_rom(path, sdat)
 
 
+def build_tone_sbnk(root: int = 60) -> bytes:
+    """One instrument: a single wave, played over the whole keyboard."""
+    direct = _note_definition(0, 0, root)
+    header = 0x3C + 128 * 4
+    offset = header
+    blob = direct
+    total = header + len(blob)
+    data = bytearray()
+    data += _std_header(b"XBNK", total).replace(b"XBNK", b"SBNK")
+    data += b"DATA" + struct.pack("<I", total - 0x10) + b"\x00" * 32
+    data += struct.pack("<I", 1)
+    data += struct.pack("<BHB", 1, offset, 0)
+    for _slot in range(127):
+        data += struct.pack("<BHB", 0, 0, 0)
+    data += blob
+    return bytes(data)
+
+
+def build_tone_sseq(pitch: int = 60, length: int = 384) -> bytes:
+    """One track, one long note on instrument 0 — a note you can measure."""
+    header_size = 0x1C
+    melody = bytearray()
+    melody += bytes([0x81, 0])                    # instrument 0
+    melody += bytes([0xC1, 127])                  # full track volume
+    melody += bytes([pitch, 110]) + build_tone_vlq(length)
+    melody += bytes([0xFF])
+
+    definitions = bytearray()
+    melody_offset = 2 * 5
+    for number, offset in ((0, melody_offset), ):
+        definitions += bytes([0x93, number, offset & 0xFF, (offset >> 8) & 0xFF,
+                              (offset >> 16) & 0xFF])
+    body = bytes(definitions) + bytes([0xFE, 0x01, 0x00]) + bytes(melody)
+    total = header_size + len(body)
+    data = bytearray()
+    data += _std_header(b"SSEQ", total)
+    data += b"DATA" + struct.pack("<II", total - 0x10, header_size)
+    data += body
+    return bytes(data)
+
+
+def build_tone_vlq(value: int) -> bytes:
+    return _vlq(value)
+
+
+def build_tone_rom(path: str, root: int = 60,
+                   pitch: int = 60, rate: int = 16000) -> str:
+    """A ROM whose one instrument is a seamless looped sine at a known pitch.
+
+    The tone is two full periods in 64 samples, looped from 0 to 64, so a
+    playback that is pitch-correct reproduces exactly ``rate / 32`` Hz. That is
+    what makes the sampled renderer measurable instead of merely listenable.
+    """
+    samples = [int(round(127 + 100 * math.sin(2 * math.pi * index / 32.0)))
+               for index in range(64)]
+    wave8 = _swav(bytes(samples), 0, rate, looped=True, loop_start=0,
+                  samples=64)
+    header = 0x3C + 4
+    total = header + len(wave8)
+    swar = bytearray()
+    swar += _std_header(b"SWAR", total)
+    swar += b"DATA" + struct.pack("<I", total - 0x10) + b"\x00" * 32
+    swar += struct.pack("<I", 1)
+    swar += struct.pack("<I", header)
+    swar += wave8
+    sdat = build_sdat(sequences=[("TONE", build_tone_sseq(pitch))],
+                      sbnk=build_tone_sbnk(root), swar=bytes(swar))
+    return build_rom(path, sdat)
+
+
 # ---------------------------------------------------------------------- waves
 
 def _swav(pcm: bytes, wave_type: int, rate: int, looped: bool = False,

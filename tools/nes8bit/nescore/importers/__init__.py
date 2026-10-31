@@ -150,6 +150,22 @@ def catalogue(path: str, length: bool = False):
         return reader(path)
 
 
+def bank_of(path: str):
+    """The instrument bank a file carries, for playing its own samples.
+
+    Only DS archives have one; everything else returns None.
+    """
+    _load_builtin()
+    module = module_of(find_for(path))
+    reader = getattr(module, "bank_of", None) if module else None
+    if reader is None:
+        return None
+    try:
+        return reader(path)
+    except Exception:
+        return None
+
+
 def read_source(path: str, settings=None):
     """Read a file with whatever the format needs from the settings.
 

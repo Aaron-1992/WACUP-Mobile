@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import analyze, chips, importers, mix
+from . import analyze, chips, importers, mix, sampled
 from .arrange import Options, Stats, arrange
 from .render import RenderOptions, render, wav_bytes
 from .vgmout import write_vgm
@@ -35,6 +35,7 @@ class Settings:
     compress: bool = True          # gentle master compression
     sequence: str = ""              # which song inside a bank archive (DS ROMs)
     bank: str = ""                  # which instrument bank to take with it
+    samples: bool = False           # play the game's own instruments, not a chip
 
     def chips(self):
         """The extension chips that are switched on, in display order."""
@@ -46,8 +47,21 @@ class Settings:
 
     def tag(self) -> str:
         """What the file name says the music was played on."""
+        if self.samples:
+            return "ds"
         names = (["nes"] if self.base else []) + self.chips()
         return "+".join(names) or "silent"
+
+    def sample_options(self) -> sampled.SampleOptions:
+        """The sampled renderer's settings, from the same boxes as the chips."""
+        return sampled.SampleOptions(
+            rate=min(sampled.NATIVE_RATE, max(8000, int(self.rate))),
+            gain=float(self.gain),
+            stereo=bool(self.stereo),
+            echo=bool(self.echo),
+            limit=bool(self.limit),
+            compress=bool(self.compress),
+        )
 
     def arrange_options(self) -> Options:
         return Options(
@@ -81,6 +95,7 @@ class Result:
     seconds: float = 0.0
     voices: int = 0
     channels: Dict[str, int] = field(default_factory=dict)
+    tracks: List[str] = field(default_factory=list)   # sampled mode: the archive's tracks
     stats: Optional[Stats] = None
     analysis: Optional[object] = None
     analysis_lines: List[str] = field(default_factory=list)
@@ -101,6 +116,7 @@ class Result:
     song_count: int = 0
     waves: Dict[str, int] = field(default_factory=dict)    # PC Engine wave RAM
     advice: List[str] = field(default_factory=list)        # why it may sound odd
+    samples_mode: bool = False      # rendered on the game's samples, not a chip
 
 
 def output_name(source: str, settings: Settings, label: str = "") -> str:
@@ -192,6 +208,10 @@ def convert_file(source: str, settings: Settings,
     result.analysis = analysis
     result.analysis_lines = analysis.summary_lines()
 
+    if settings.samples:
+        return _convert_samples(source, song, analysis, settings, result, target,
+                                keep_in_memory, report, started)
+
     report("Arranging for the chip", 0.3)
     channels = settings.channels()
     if not channels:
@@ -261,6 +281,96 @@ def convert_file(source: str, settings: Settings,
         result.advice = []
     report("Done", 1.0)
     return result
+
+
+def _convert_samples(source: str, song, analysis, settings: "Settings",
+                     result: Result, target: str, keep_in_memory: bool,
+                     report, started: float) -> Result:
+    """Render the song on the archive's own instruments instead of a chip.
+
+    This is the answer to "it sounds nothing like the song": nothing is
+    translated, so nothing can be translated badly. It is not 8-bit and does not
+    pretend to be — the file name says ``[ds]`` rather than ``[nes]``.
+    """
+    import time
+
+    from .render import RenderOptions, wav_bytes
+
+    carrying = importers.bank_of(source)
+    if carrying is None:
+        result.ok = False
+        result.error = ("the game's own samples only exist in a Nintendo DS file "
+                        "(a .nds or a .sdat); this file has none, so switch the "
+                        "samples off to convert it to a chip")
+        return result
+    archive, bank_index = carrying
+
+    options = settings.sample_options()
+    report("Playing the game's own instruments", 0.45)
+    rendered = sampled.render_song(song, archive, bank_index, options)
+    if not rendered.notes_played:
+        result.ok = False
+        result.error = ("none of this song's instruments could be found in the "
+                        "archive's bank")
+        return result
+
+    report("Writing the WAV", 0.9)
+    wav_options = RenderOptions(rate=rendered.rate, bits=16,
+                                stereo=bool(options.stereo), gain=1.0,
+                                equalise=False, echo=False, limit=False,
+                                compress=False)
+    audio = wav_bytes(rendered.pcm, wav_options)
+    directory = os.path.dirname(target)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    if keep_in_memory:
+        result.wav_bytes = audio
+    else:
+        try:
+            with open(target, "wb") as handle:
+                handle.write(audio)
+        except OSError as error:
+            result.ok = False
+            result.error = "could not write %s (%s)" % (target, error)
+            return result
+
+    # the pattern page shows the archive's tracks, one column each
+    tracks = rendered.tracks or sampled.group_tracks(song.notes)
+    for note in song.notes:
+        note.channel = "trk %02d" % (int(note.part) + 1)
+    result.wav_path = target
+    result.notes = song.notes
+    result.tempo = float(getattr(analysis, "tempo", 0.0) or 120.0)
+    result.kept = rendered.notes_played
+    result.left_out = rendered.notes_skipped
+    result.seconds = rendered.seconds
+    result.voices = rendered.voices
+    result.channels = {name: len(notes) for name, notes in tracks.items()}
+    result.stats = Stats()
+    result.stats.per_channel_notes = dict(result.channels)
+    result.samples_mode = True
+    result.tracks = list(tracks)
+    result.render_seconds = time.time() - started
+    result.advice = _sample_advice(rendered, song)
+    report("Done", 1.0)
+    return result
+
+
+def _sample_advice(rendered, song) -> List[str]:
+    """What to know about a sampled render: mostly that it is not a conversion."""
+    lines: List[str] = []
+    lines.append("the game's own instruments, not a chip — this is the soundtrack "
+                 "as the ROM plays it")
+    if rendered.notes_skipped:
+        lines.append("%d note(s) had no instrument in the bank and were skipped"
+                     % rendered.notes_skipped)
+    if rendered.synthetic:
+        lines.append("%d note(s) use the bank's square-wave instruments, which "
+                     "have no sample to play" % rendered.synthetic)
+    if getattr(song, "ds_song_count", 0) and song.ds_song_count > 1:
+        lines.append("song '%s' of %d in this archive" % (song.ds_song,
+                                                         song.ds_song_count))
+    return lines
 
 
 def _advice(result: Result, stats, grouped, stems, duration: float,

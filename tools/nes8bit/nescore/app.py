@@ -318,6 +318,7 @@ class App:
         settings.export_vgm = bool(saved.get("export_vgm", False))
         settings.sharing = False        # never resurrect arpeggio cramming
         settings.sampled_drums = bool(saved.get("sampled_drums", True))
+        settings.samples = bool(saved.get("samples", False))
         return settings
 
     def _save_settings(self) -> None:
@@ -330,6 +331,7 @@ class App:
                     "export_vgm": self.settings.export_vgm,
                     "sharing": self.settings.sharing,
                     "sampled_drums": self.settings.sampled_drums,
+                    "samples": self.settings.samples,
                 }, handle, indent=2)
         except OSError:
             pass
@@ -936,6 +938,23 @@ class App:
     # ----------------------------------------------------------------- switches
 
 
+    def toggle_samples(self) -> None:
+        """Switch between a chip conversion and the game's own instruments.
+
+        The two are exclusive by nature: one translates the music onto a console,
+        the other plays the archive's own samples, so there is no chip involved
+        at all. Turning it on dims the chips instead of pretending they apply.
+        """
+        self.settings.samples = not self.settings.samples
+        self._save_settings()
+        if self.settings.samples:
+            self.status = ("The game's own instruments: the soundtrack as the ROM "
+                           "plays it — no chip, and the chips are not used")
+        else:
+            self.status = "Back to a chip conversion (%s)" % self.settings.tag()
+        self.status_error = False
+        self._dirty = True
+
     def toggle_chip(self, name: str) -> None:
         """Switch one chip on or off.
 
@@ -956,7 +975,7 @@ class App:
             else:
                 self.settings.base = True
             self._save_settings()
-            self.status = "Playing on %s" % self.console_label()
+            self.status = self._chip_status()
             self.status_error = False
             return
         if name in self.settings.extensions:
@@ -970,11 +989,34 @@ class App:
         else:
             self.settings.extensions.append(name)
         self._save_settings()
-        self.status = "Playing on %s" % self.console_label()
+        self.status = self._chip_status()
         self.status_error = False
+
+    def _status_summary(self) -> str:
+        """The right-hand end of the status bar: what the music is played on."""
+        if self.settings.samples:
+            return "NO CHIP · %s" % self.console_label().upper()
+        return "%d VOICES · %d CHIP%s · %s" % (
+            self.voice_count(), self.chip_count(),
+            "" if self.chip_count() == 1 else "S",
+            self.console_label().upper())
+
+    def _chip_status(self) -> str:
+        """The status line after a chip was switched, without lying.
+
+        In sampled mode the chips are stored but not used, so saying "playing on
+        the NES" would be untrue: the choice applies the moment the samples go
+        off again, and the line says so.
+        """
+        if self.settings.samples:
+            return ("Chips saved (%s) — they apply when the game's samples are "
+                    "switched off" % self.settings.tag())
+        return "Playing on %s" % self.console_label()
 
     def console_label(self) -> str:
         """What the console currently is, for the status line and the header."""
+        if self.settings.samples:
+            return "THE GAME'S OWN SAMPLES"
         names = ["THE NES"] if self.settings.base else []
         names += [chips.CHIP_LABELS.get(name, name.upper())
                   for name in self.settings.extensions
@@ -1590,7 +1632,13 @@ class App:
         of milliseconds a frame on a long tune and the reason scrolling stuttered.
         """
         result = self.results[self.selected_result] if self.results else None
-        channels = tuple(spec.id for spec in self.settings.channels())
+        # in sampled mode there are no chips to show: the columns are the
+        # archive's own tracks, and drawing pulse/triangle headers over them
+        # would claim a console that is not in the signal path at all
+        if self.settings.samples:
+            channels = tuple(getattr(result, "channels", {}) or {})
+        else:
+            channels = tuple(spec.id for spec in self.settings.channels())
         key = (id(result), self.selected_result, len(self.results), channels)
         if key == self._pattern_key:
             return self._pattern_cache
@@ -1844,10 +1892,14 @@ class App:
         self.screen.fill(t.pattern_head, rect)
         theme.raised(self.screen, rect, t, 1)
         hidden = sum(len(z) - 1 for z in grid.values())
-        text = "PAT %02X:%02X   TIME %05.1fs / %05.1fs   BPM %3d   %d VOICES" % (
+        word = ("TRACK" if getattr(result, "samples_mode", False) else "VOICE")
+        if len(channels) != 1:
+            word += "S"
+        text = "PAT %02X:%02X   TIME %05.1fs / %05.1fs   BPM %3d   %d %s" % (
             cursor_row // PATTERN_ROWS, cursor_row % PATTERN_ROWS,
             cursor_row * row_seconds, rows * row_seconds,
-            int(round(getattr(result, "tempo", 0.0) or 120.0)), len(channels))
+            int(round(getattr(result, "tempo", 0.0) or 120.0)), len(channels),
+            word)
         if hidden:
             text += "   +%d SHARED" % hidden
         surface = self.fonts["head"].render(text, t.smooth, t.text)
@@ -1968,13 +2020,15 @@ class App:
                     if name not in ("dual", "pce")]
         rows_needed = 3 + (len(entries) - 3 + 1) // 2
         row_h = 24
-        chips_h = rows_needed * row_h + 36
+        samples_on = bool(self.settings.samples)
+        chips_h = (rows_needed + 1) * row_h + 36
         chips_box = pygame.Rect(rect.x, rect.y, rect.width, chips_h)
         inner = theme.panel(self.screen, chips_box, t, "CHIPS", self.fonts["tiny"])
         self._tiny_buttons(chips_box, (("ALL", self.all_chips, 44),
                                        ("NONE", self.no_chips, 52)))
         theme.field(self.screen, inner, t, t.field)
         self.chip_rects = []
+        self.samples_rect = pygame.Rect(0, 0, 0, 0)
         col_w = inner.width // 2
         column, line = 0, 0
         for index, (name, label, count, wide) in enumerate(entries):
@@ -1993,11 +2047,15 @@ class App:
                     column, line = 0, line + 1
             on = (self.settings.base if name == "nes"
                   else name in self.settings.extensions)
-            if row.collidepoint(self.mouse):
+            # while the game's own samples play there is no chip in the signal
+            # path, so the chips are drawn as out of use and do not take clicks
+            if samples_on:
+                on = False
+            if not samples_on and row.collidepoint(self.mouse):
                 self.screen.fill(t.playing, row)
             self._text(row.x + 4, row.y + (row_h - 16) // 2, "%02d" % (index + 1),
                        "head", t.pattern_vol if on else t.pattern_empty)
-            tag = "+%d %s" % (count, "ON" if on else "OFF")
+            tag = "--" if samples_on else "+%d %s" % (count, "ON" if on else "OFF")
             tag_surface = self.fonts["tiny"].render(
                 tag, t.smooth, t.ok if on else t.pattern_empty)
             self.screen.blit(tag_surface,
@@ -2009,7 +2067,28 @@ class App:
                        _fit(self.fonts["small"], label, room), "small",
                        t.field_text if on else t.pattern_empty)
             self.chip_rects.append((name, row.copy()))
-            self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
+            if not samples_on:
+                self.hits.append((row.copy(), (lambda n=name: self.toggle_chip(n))))
+
+        # --- the fourth way to play the music: not a chip at all
+        sample_row = pygame.Rect(inner.x, inner.y + 1 + rows_needed * row_h,
+                                 inner.width - 2, row_h - 2)
+        if sample_row.collidepoint(self.mouse):
+            self.screen.fill(t.playing, sample_row)
+        self._text(sample_row.x + 4, sample_row.y + (row_h - 16) // 2, "S ",
+                   "head", t.accent if samples_on else t.pattern_vol)
+        samples_tag = self.fonts["tiny"].render(
+            "ON" if samples_on else "OFF", t.smooth,
+            t.ok if samples_on else t.pattern_empty)
+        self.screen.blit(samples_tag, (sample_row.right - samples_tag.get_width() - 4,
+                                       sample_row.y + (row_h - 16) // 2))
+        room = sample_row.right - samples_tag.get_width() - 8 - (sample_row.x + 32)
+        self._text(sample_row.x + 32,
+                   sample_row.y + (row_h - self.fonts["small"].get_height()) // 2,
+                   _fit(self.fonts["small"], "THE GAME'S OWN SAMPLES", room),
+                   "small", t.accent if samples_on else t.field_text)
+        self.samples_rect = sample_row.copy()
+        self.hits.append((sample_row.copy(), self.toggle_samples))
 
         # --- queue: one row per file with its own status, so a batch is visible
         rest = rect.bottom - chips_box.bottom - 6
@@ -2185,7 +2264,11 @@ class App:
                                                   else t.pattern_inst)
                 self.screen.blit(clock, (row.right - clock.get_width() - 4,
                                          row.y + 3))
-            if result.ok:
+            if result.ok and getattr(result, "samples_mode", False):
+                line = "%d track%s · %d note%s · own samples" % (
+                    result.voices, "" if result.voices == 1 else "s",
+                    result.kept, "" if result.kept == 1 else "s")
+            elif result.ok:
                 line = "%d voices · %d kept · %d out" % (
                     result.voices, result.kept, result.left_out)
                 if getattr(result, "thinned", 0):
@@ -2395,10 +2478,8 @@ class App:
                                  box.centery - label.get_height() // 2))
 
         message = self.progress_label if self.busy else self.status
-        right = _fit(self.fonts["tiny"], "%d VOICES · %d CHIP%s · %s" % (
-            self.voice_count(), self.chip_count(),
-            "" if self.chip_count() == 1 else "S",
-            self.console_label().upper()), max(80, rect.width // 2))
+        right = _fit(self.fonts["tiny"], self._status_summary(),
+                     max(80, rect.width // 2))
         right_surface = self._surface("tiny", right, t.dim)
         self.screen.blit(right_surface,
                          (rect.right - right_surface.get_width() - 12,
@@ -2854,6 +2935,29 @@ def selftest(screenshot: Optional[str] = None) -> int:
                   str(app.settings.rate))
             app.all_chips()
             app.settings.rate = 44100
+
+            # --- the fourth way to play the music: the game's own samples
+            app.draw()
+            check("the CHIPS panel has a samples row",
+                  app.samples_rect.width > 0 and app.samples_rect.height > 0,
+                  str(app.samples_rect))
+            click(app.samples_rect)
+            check("the samples row switches the samples on",
+                  app.settings.samples, str(app.settings.samples))
+            app.draw()
+            chips_before = list(app.settings.extensions)
+            _name, chip_rect = app.chip_rects[0]
+            reachable = click(chip_rect)
+            check("a chip row answers nothing while the samples are playing",
+                  not reachable and app.settings.extensions == chips_before,
+                  "reachable=%s, chips=%s" % (reachable, app.settings.extensions))
+            check("the status line stops claiming a console",
+                  "NO CHIP" in app._status_summary(), app._status_summary())
+            click(app.samples_rect)
+            check("the samples row switches them off again",
+                  not app.settings.samples, str(app.settings.samples))
+            check("and the console comes back",
+                  "VOICES" in app._status_summary(), app._status_summary())
 
         # --- a Nintendo DS ROM: queue it, convert it, and see the extras named
         _selftest_ds_rom(app, check, click)

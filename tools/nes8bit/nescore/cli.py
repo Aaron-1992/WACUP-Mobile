@@ -17,7 +17,7 @@ import sys
 import time
 from typing import Dict
 
-from . import analyze, chips, convert, importers, mix
+from . import analyze, chips, convert, importers, mix, sampled
 from .arrange import Options, arrange
 from .render import RenderOptions, render, write_stems, write_wav
 from .vgmout import write_vgm
@@ -74,11 +74,12 @@ def _tag(extensions, base: bool = True) -> str:
 
 
 def _output_path(source: str, out_argument: str, extensions, suffix: str,
-                 multiple: bool, label: str = "", base: bool = True) -> str:
+                 multiple: bool, label: str = "", base: bool = True,
+                 tag: str = "") -> str:
     stem = os.path.splitext(os.path.basename(source))[0]
     if label:
         stem = "%s %s" % (stem, convert._plain_name(label))
-    named = "%s [%s]%s" % (stem, _tag(extensions, base), suffix)
+    named = "%s [%s]%s" % (stem, tag or _tag(extensions, base), suffix)
 
     if not out_argument:
         return os.path.join(os.path.dirname(source), named)
@@ -266,6 +267,64 @@ def _diagnosis(song, analysis, notes, stats, grouped, stems, duration):
     return lines
 
 
+def _convert_samples(source: str, song, analysis, args, multiple: bool) -> int:
+    """Render the song on the archive's own instruments, straight to a WAV."""
+    carrying = importers.bank_of(source)
+    if carrying is None:
+        print("  x the game's own samples only exist in a Nintendo DS file "
+              "(.nds / .sdat); drop --samples to convert to a chip")
+        return 1
+    archive, bank_index = carrying
+    options = sampled.SampleOptions(
+        rate=min(sampled.NATIVE_RATE, max(8000, int(args.rate))),
+        gain=args.gain,
+        stereo=bool(args.stereo),
+        echo=bool(args.echo),
+        limit=not args.no_limit,
+        compress=not args.no_compress,
+        max_seconds=args.max_seconds,
+    )
+    started = time.time()
+    rendered = sampled.render_song(song, archive, bank_index, options)
+    if not rendered.notes_played:
+        print("  x none of this song's instruments could be found in the bank")
+        return 1
+
+    label = getattr(song, "ds_song", "") if getattr(
+        song, "ds_song_count", 0) > 1 else ""
+    target = _output_path(source, args.output, (), ".wav", multiple, label,
+                          base=False, tag="ds")
+    wav_options = RenderOptions(rate=rendered.rate,
+                                bits=16 if args.bits == 16 else 8,
+                                stereo=bool(args.stereo), gain=1.0,
+                                equalise=False, echo=False, limit=False,
+                                compress=False)
+    write_wav(target, rendered.pcm, wav_options)
+    elapsed = time.time() - started
+    print("  > %s" % target)
+    if getattr(args, "diagnose", False):
+        print("  song: %s" % (getattr(song, "ds_song", "") or song.title
+                              or os.path.basename(source)))
+        print("  %.1f s, %.0f BPM, %d note%s played on the game's own instruments"
+              % (rendered.seconds, analysis.tempo or 120.0,
+                 rendered.notes_played, "" if rendered.notes_played == 1 else "s"))
+        print("  %d instrument(s), %d drum kit(s) in this bank; %d track(s)"
+              % (rendered.instruments, rendered.drums, rendered.voices))
+        if rendered.synthetic:
+            print("  ! %d note(s) are the bank's square-wave instruments, which "
+                  "have no sample to play" % rendered.synthetic)
+        if rendered.notes_skipped:
+            print("  ! %d note(s) had no instrument in the bank"
+                  % rendered.notes_skipped)
+        print("  this is the soundtrack, not a conversion: no chip is involved")
+    if args.stats or args.verbose:
+        for line in analysis.summary_lines():
+            print("    " + line)
+        print("  rendered %.1fs of audio in %.2fs (%dx realtime)"
+              % (rendered.seconds, elapsed, rendered.seconds / max(0.001, elapsed)))
+    return 0
+
+
 def _convert(source: str, args, extensions, channels, multiple: bool = False,
              sequence: str = "", bank: str = "", base: bool = True) -> int:
     started = time.time()
@@ -285,6 +344,10 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
             note.pitch = max(0, min(127, note.pitch + args.transpose))
 
     analysis = analyze.analyse(song)
+
+    if getattr(args, "samples", False):
+        return _convert_samples(source, song, analysis, args, multiple)
+
     options = Options(
         allow_sharing=bool(args.sharing),
         dedupe=not args.no_dedupe,
@@ -385,6 +448,10 @@ def main(argv=None) -> int:
                              "--extensions dual a single second APU")
     parser.add_argument("--list-extensions", action="store_true",
                         help="show the chips and the channels they add, then exit")
+    parser.add_argument("--samples", action="store_true",
+                        help="do not convert at all: play the song on the game's "
+                             "own instruments, out of its own bank (DS only), and "
+                             "write that. The file name says [ds], not [nes]")
     parser.add_argument("--stats", action="store_true", help="report what went where")
     parser.add_argument("--diagnose", action="store_true",
                         help="say whether the tune is actually audible: which song "
