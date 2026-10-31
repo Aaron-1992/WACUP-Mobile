@@ -332,7 +332,13 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
                            bank or getattr(args, "bank", ""))
     song = importers.read_source(source, choice)
 
+    sampled_run = bool(getattr(args, "samples", False))
     for warning in song.warnings:
+        # two of these describe the chip arrangement that a sampled render does
+        # not make — the notes already play on those very samples
+        if sampled_run and ("took their tone from the bank" in warning
+                            or "drum notes found in the bank's kit" in warning):
+            continue
         print("  ! %s" % warning)
 
     if not song.notes:
@@ -345,7 +351,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
 
     analysis = analyze.analyse(song)
 
-    if getattr(args, "samples", False):
+    if sampled_run:
         return _convert_samples(source, song, analysis, args, multiple)
 
     options = Options(
