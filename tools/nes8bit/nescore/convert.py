@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import analyze, chips, importers
+from . import analyze, chips, importers, mix
 from .arrange import Options, Stats, arrange
 from .render import RenderOptions, render, wav_bytes
 from .vgmout import write_vgm
@@ -100,6 +100,7 @@ class Result:
     song_index: int = 0                                    # 1-based, for "12 of 37"
     song_count: int = 0
     waves: Dict[str, int] = field(default_factory=dict)    # PC Engine wave RAM
+    advice: List[str] = field(default_factory=list)        # why it may sound odd
 
 
 def output_name(source: str, settings: Settings, label: str = "") -> str:
@@ -253,5 +254,43 @@ def convert_file(source: str, settings: Settings,
     result.stats = stats
     result.waves = dict(stats.waves)
     result.render_seconds = time.time() - started
+    try:
+        # a diagnosis is a courtesy: never let it fail a conversion
+        result.advice = _advice(result, stats, grouped, stems, duration, song)
+    except Exception:
+        result.advice = []
     report("Done", 1.0)
     return result
+
+
+def _advice(result: Result, stats, grouped, stems, duration: float,
+            song) -> List[str]:
+    """The short list of reasons a converted song might not sound like itself.
+
+    A conversion can be correct and still be unrecognisable — because the melody
+    ended up under the drums, because the console ran out of voices in the middle
+    of the tune, or because the file that was read is a three-second jingle rather
+    than the song somebody meant to convert. The window shows the first of these
+    and the command line can print them all.
+    """
+    lines: List[str] = []
+    if stems:
+        roles = mix.channel_roles(grouped)
+        gains = mix.balance(stems, roles)
+        levels = mix.role_levels(stems, roles, gains)
+        heard = mix.audibility(levels)
+        if heard and heard["gap"] < -2.0:
+            lines.append("the melody sits %.0f dB under the rest of the mix"
+                         % -heard["gap"])
+    if stats.left_out.get("melody"):
+        lines.append("%d melody note(s) were left out" % stats.left_out["melody"])
+    elif stats.simplified:
+        lines.append("%d note(s) left out: every voice was busy"
+                     % stats.simplified)
+    if stats.folded:
+        lines.append("%d note(s) moved by whole octaves to fit the chip"
+                     % stats.folded)
+    if duration < 3.0:
+        lines.append("only %.1f s of music — a jingle or a sound effect?"
+                     % duration)
+    return lines

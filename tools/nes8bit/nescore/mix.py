@@ -84,6 +84,47 @@ def balance(stems: Dict[str, List[float]],
     return gains
 
 
+def role_levels(stems: Dict[str, List[float]],
+                roles: Dict[str, str],
+                gains: Dict[str, float]) -> Dict[str, float]:
+    """The measured level of each *role* in the finished mix, in dB.
+
+    Stems are rendered per channel; a listener hears roles. Three harmony channels
+    add up, so they are summed (as the mix does) rather than averaged, and the
+    result is the RMS of everything that voice-group actually contributes.
+    """
+    sums: Dict[str, List[float]] = {}
+    for channel, buffer in stems.items():
+        role = roles.get(channel, "")
+        gain = gains.get(channel, 1.0)
+        if role in sums:
+            target = sums[role]
+            for index, value in enumerate(buffer):
+                target[index] += value * gain
+        else:
+            sums[role] = [value * gain for value in buffer]
+    levels: Dict[str, float] = {}
+    for role, buffer in sums.items():
+        level = _active_level(buffer)
+        levels[role] = 20.0 * math.log10(level) if level > 0 else -120.0
+    return levels
+
+
+def audibility(levels: Dict[str, float]) -> Dict[str, float]:
+    """How far the melody sits above or below everything else, in dB.
+
+    Levels are dB, so the rest of the mix is added as energy and turned back into
+    dB: adding decibels together would be wrong the moment two parts play at once.
+    """
+    melody = levels.get("melody")
+    rest = [value for role, value in levels.items() if role != "melody"]
+    if melody is None or not rest:
+        return {}
+    total = sum(10.0 ** (value / 10.0) for value in rest)
+    together = 10.0 * math.log10(total) if total > 0 else -120.0
+    return {"melody": melody, "rest": together, "gap": melody - together}
+
+
 def echo_delay(notes) -> float:
     """One or two rows of the song's own grid, so the echo lands on the beat.
 

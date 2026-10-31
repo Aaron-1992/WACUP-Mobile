@@ -285,6 +285,16 @@ jobs:
             once and kept, and the window only repaints when something changed, so a
             three-minute tune that used to sit at 19 ms a frame stays under 5 ms with
             no spikes.
+
+            **It also says when a conversion is not going to sound like the song.**
+            The strip under the toolbar confesses the first thing worth knowing —
+            notes left out because the console was full, a melody sitting under the
+            mix, a file that is only a jingle — and `--diagnose` prints the whole
+            report on the command line: which song was converted, how many notes of
+            each role survived, and the measured level of every voice group
+            (`melody -20.6 dB against the rest -23.9 dB`). `--extensions all`,
+            `--list-songs`/`--sequence` and `--stems` are the usual answers, and the
+            README has a section that walks through them.
           files: |
             dist/chip8bit.exe
             dist/chip8bit-cli.exe

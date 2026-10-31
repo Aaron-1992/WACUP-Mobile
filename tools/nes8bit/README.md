@@ -459,6 +459,53 @@ restarting on every note.
 Samples are shipped as rendered audio, so there is no sample library to install —
 and no copyrighted sample data anywhere: the kit is maths.
 
+## If it doesn't sound like the song
+
+A console with four voices cannot play a twenty-voice soundtrack, and when it runs
+out the tool has to choose: it keeps the tune and drops the chord bed, and it counts
+every note it drops. That is the usual reason a conversion is *correct* and still
+hard to follow, and it is why the window and the command line now say what happened
+instead of leaving you to guess.
+
+In the window, the last line of the strip under the toolbar shows the first thing
+worth knowing about the conversion — `! 53 note(s) left out: every voice was busy`,
+`! the melody sits 9 dB under the rest of the mix`, `! only 0.8 s of music — a
+jingle or a sound effect?`. On the command line, ask for the whole report:
+
+```
+chip8bit-cli.exe --cli song.mid --diagnose
+```
+
+```
+  song: song.mid
+  16.0 s, 120 BPM, 4/4, 128 notes read, 116 placed
+  melody -20.6 dB against the rest -23.9 dB (3.3 dB apart)
+  voice levels: melody -20.6 dB, drum -27.0 dB, bass -29.0 dB, harmony -31.0 dB
+  roles placed: bass 16, drum 32, harmony 4, melody 64
+  ! 12 note(s) were left out because every voice was busy (harmony 12)
+```
+
+(the same file with `--extensions all` keeps all 128 notes and the last line reads
+`nothing looks wrong: the melody leads, every note found a voice`.)
+
+What to do with it:
+
+* **`--extensions all`** (or the `CHIPS` panel) is the fix for a large share of
+  "left out": a second APU and a PC Engine take the console to 32 voices and the
+  same file then keeps everything. The report says so when it helps.
+* **`--stems folder`** renders one WAV per console voice — listen to the `pulse1`
+  stem to hear exactly what the melody became, without the drums on top.
+* **`--list-songs`** then `--sequence NAME`. A DS ROM holds the songs *and* the
+  jingles, the fanfares and the sound effects; converting the first sequence is a
+  good way to hear a two-second blip. `--all-songs` converts everything, and every
+  file is named after its song so you can tell them apart.
+* **`--bits 8`** and **`--rate 22050`** are for the crunch, not for clarity: if a
+  conversion sounds gritty or "underwater", check the `BITS` and `RATE` boxes in
+  the top strip are back at `16` and `44k`. They are remembered between runs.
+* **The loop is not played.** A DS sequence that loops forever is rendered once,
+  from the top to the loop point, so a 40-second song is 40 seconds and not four
+  minutes of the same phrase.
+
 ## Honest limits
 
 * VGM can address the NES APU (and a second one, via dual-chip support), the

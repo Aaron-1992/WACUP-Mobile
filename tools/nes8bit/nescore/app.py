@@ -1241,11 +1241,13 @@ class App:
         self.screen.blit(caption, (x + 12, rect.centery - caption.get_height() // 2))
 
     def _draw_info(self, rect: pygame.Rect) -> None:
-        """What the converter found in the file, in three flat lines.
+        """What the converter found in the file, and what it is unsure about.
 
         This used to be a titled panel with a sunken well around it, which cost a
         third of the top of the window and read like a 1995 message box. It is a
-        strip now: a marker line, then the song and what came out of it.
+        strip now: the analysis on two lines, the kept/left-out totals on the
+        right of the first, and — if the conversion has something to confess — a
+        warning line under them instead of leaving the listener to wonder.
         """
         t = self.theme
         self.screen.fill(t.panel, rect)
@@ -1256,32 +1258,46 @@ class App:
         # the strip does not say the same number twice
         lines = [line for line in self._found_lines()
                  if "notes kept" not in line]
-        keys = ("body", "small", "small", "tiny")
-        colours = (t.field_text, t.pattern_inst, t.pattern_vol, t.dim)
-        summary = self._result_summary()
+        keys = ("body", "small", "small")
+        colours = (t.field_text, t.pattern_inst, t.pattern_vol)
+        analysis_lines = lines[:2]
+
+        advice = self._advice_line()
+        summary = "" if advice else self._result_summary()
         totals = self._surface("tiny", summary, t.accent) if summary else None
 
         x = rect.x + 14
         y = rect.y + 7
-        shown = [index for index, line in enumerate(lines[:3]) if line]
-        if not shown:
-            return
-        for position, index in enumerate(shown):
-            key = keys[index]
+        for position, text in enumerate(analysis_lines):
+            if not text:
+                continue
+            key = keys[min(position, 2)]
             font = self.fonts[key]
             room = rect.right - x - 14
             if position == 0 and totals is not None:
-                # the totals sit at the right of the headline row, so the
-                # headline stops before them instead of running underneath
+                # the totals sit at the right of the first row, so the song name
+                # stops before them instead of running underneath
                 room -= totals.get_width() + 16
-            text = _fit(font, lines[index], room)
-            surface = self._surface(key, text, colours[min(index, 3)])
+            surface = self._surface(key, _fit(font, text, room),
+                                    colours[min(position, 2)])
             self.screen.blit(surface, (x, y))
             y += font.get_height() + 3
 
         if totals is not None:
             self.screen.blit(totals, (rect.right - totals.get_width() - 14,
                                       rect.y + 9))
+        if advice:
+            surface = self._surface("tiny", _fit(self.fonts["tiny"], "! " + advice,
+                                                 rect.width - 28), t.warn)
+            self.screen.blit(surface, (x, y))
+
+    def _advice_line(self) -> str:
+        """The one thing worth knowing about the selected conversion, if any."""
+        if not self.results:
+            return ""
+        chosen = self.results[min(self.selected_result, len(self.results) - 1)]
+        advice = getattr(chosen, "advice", None)
+        return advice[0] if advice else ""
 
     def _result_summary(self) -> str:
         """The one-line totals for the selected conversion, or nothing."""

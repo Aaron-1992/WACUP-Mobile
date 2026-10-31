@@ -3,6 +3,8 @@
 Run with:  python tests/run_tests.py
 """
 
+import contextlib
+import io
 import math
 import os
 import struct
@@ -1040,6 +1042,46 @@ def main_test() -> None:
               "nds" in str(error).lower() or "rom" in str(error).lower(),
               str(error))
 
+    print("does it sound like the song")
+    # the balance maths: the melody either sits above the rest of the mix or it
+    # does not, and both cases have to come out with the right sign
+    lead_up = mix_module.audibility({"melody": -20.0, "drum": -26.0})
+    check("a melody 6 dB up reads as above the mix", abs(lead_up["gap"] - 6.0) < 0.1,
+          str(lead_up))
+    buried = mix_module.audibility({"melody": -30.0, "drum": -20.0,
+                                    "bass": -24.0})
+    check("a buried melody reads as below the mix", buried["gap"] < -8.0,
+          str(buried))
+    check("one part alone has nothing to be compared with",
+          not mix_module.audibility({"melody": -20.0}))
+
+    # a conversion with the console full has to say so, not just sound thin
+    crowded = _crowded_midi(os.path.join(work, "crowded.mid"))
+    crowded_settings = convert.Settings()
+    crowded_result = convert.convert_file(
+        crowded, crowded_settings,
+        output_path=os.path.join(work, "crowded.wav"))
+    check("a crowded conversion still succeeds", crowded_result.ok,
+          crowded_result.error)
+    check("and it says that notes were left out",
+          any("left out" in line for line in crowded_result.advice),
+          str(crowded_result.advice))
+    wide = convert.Settings()
+    wide.extensions = ["dual", "pce", "vrc6", "mmc5", "fds", "n163", "psg", "dmc"]
+    wide_result = convert.convert_file(
+        crowded, wide, output_path=os.path.join(work, "crowded-wide.wav"))
+    check("with the chips on, nothing is left out", wide_result.left_out == 0,
+          str(wide_result.left_out))
+    check("the melody is reported as audible",
+          mix_module.audibility(
+              mix_module.role_levels(
+                  wide_result.stems,
+                  mix_module.channel_roles(_grouped(wide_result)),
+                  mix_module.balance(wide_result.stems,
+                                     mix_module.channel_roles(_grouped(wide_result)))
+              )).get("gap", 0.0) > -12.0,
+          "melody lost against the mix")
+
     print("command line")
     out_dir = os.path.join(work, "cli-out")
     code = main([midi_path, "-o", out_dir, "--extensions", "vrc6,mmc5", "--stats"])
@@ -1048,6 +1090,21 @@ def main_test() -> None:
     check("cli wrote one wav", len(produced) == 1, str(produced))
     check("cli named the file after the chips",
           produced and "nes+vrc6+mmc5" in produced[0], str(produced))
+
+    # --diagnose is the answer to "it sounds weird": it has to say which song it
+    # converted, where the melody sits, and what was lost.
+    diagnose_dir = os.path.join(work, "cli-diagnose")
+    speech = io.StringIO()
+    with contextlib.redirect_stdout(speech):
+        code = main([crowded, "-o", diagnose_dir, "--diagnose"])
+    said = speech.getvalue()
+    check("--diagnose exits 0", code == 0)
+    check("--diagnose names the song it converted", "song:" in said, said[-400:])
+    check("--diagnose reports the voice levels", "voice levels:" in said)
+    check("--diagnose says the melody sits somewhere",
+          "melody" in said and "against the rest" in said)
+    check("--diagnose points at the notes it had to leave out",
+          "left out" in said)
 
     vgm_dir = os.path.join(work, "cli-vgm")
     code = main([midi_path, "-o", vgm_dir, "--export-vgm", "--max-seconds", "2"])
@@ -1195,6 +1252,50 @@ def _pitch_swing(program: int, vibrato: float, seconds: float = 2.5,
         return 999.0
     mean = sum(freqs) / len(freqs)
     return 100.0 * (max(freqs) - min(freqs)) / mean
+
+
+def _crowded_midi(path: str) -> str:
+    """A busy little tune: lead, chords, bass and drums, all at once."""
+    from nescore.demo import Track, BEAT, BAR, DIVISION
+    import struct
+
+    tracks = []
+    lead = Track("lead")
+    lead.program(0, 81)
+    scale = [72, 74, 76, 79, 81, 79, 76, 74]
+    for index, pitch in enumerate(scale * 8):
+        lead.note(0, index * BEAT // 2, BEAT // 2 - 10, pitch, 100)
+    tracks.append(lead)
+    chords = Track("chords")
+    chords.program(1, 48)
+    for bar in range(4):
+        for pitch in (60, 64, 67, 71):
+            chords.note(1, bar * BAR, BAR - 20, pitch, 80)
+    tracks.append(chords)
+    bass = Track("bass")
+    bass.program(2, 38)
+    for bar in range(4):
+        for beat in range(4):
+            bass.note(2, bar * BAR + beat * BEAT, BEAT - 20, 36, 100)
+    tracks.append(bass)
+    drums = Track("drums")
+    for bar in range(4):
+        for beat in range(4):
+            drums.note(9, bar * BAR + beat * BEAT, BEAT // 2, 36 if beat % 2 == 0 else 38, 110)
+            drums.note(9, bar * BAR + beat * BEAT + BEAT // 2, BEAT // 2, 42, 80)
+    tracks.append(drums)
+    header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, DIVISION)
+    body = b"".join(track.serialize() for track in tracks)
+    with open(path, "wb") as handle:
+        handle.write(header + body)
+    return path
+
+
+def _grouped(result) -> dict:
+    grouped = {}
+    for note in result.notes:
+        grouped.setdefault(note.channel, []).append(note)
+    return grouped
 
 
 def theme_test() -> None:

@@ -11,11 +11,13 @@ single .exe with no install step.
 
 import argparse
 import glob
+import math
 import os
 import sys
 import time
+from typing import Dict
 
-from . import analyze, chips, convert, importers
+from . import analyze, chips, convert, importers, mix
 from .arrange import Options, arrange
 from .render import RenderOptions, render, write_stems, write_wav
 from .vgmout import write_vgm
@@ -141,6 +143,89 @@ def _list_songs(inputs) -> int:
     return 0
 
 
+def _diagnosis(song, analysis, notes, stats, grouped, stems, duration):
+    """What the converter did, and where a listener might stop hearing the tune.
+
+    "It sounds weird" is not something a WAV can explain by itself, so this prints
+    the things that actually decide whether a conversion is recognisable: which
+    song was picked, how many notes of each role survived, whether the melody sits
+    above the rest of the mix, and whether anything was moved by an octave or
+    thrown away because the console ran out of voices.
+    """
+    lines = []
+    title = getattr(song, "ds_song", "") or getattr(song, "title", "") \
+        or os.path.basename(getattr(song, "source_path", "") or "this file")
+    count = int(getattr(song, "ds_song_count", 0) or 0)
+    index = int(getattr(song, "ds_song_index", 0) or 0)
+    if count > 1:
+        title = "%s  (song %d of %d)" % (title, index, count)
+    lines.append("  song: %s" % title)
+    lines.append("  %.1f s, %.0f BPM, %s, %d notes read, %d placed" % (
+        duration, analysis.tempo or 120.0, analysis.meter or "meter unknown",
+        len(song.notes), len(notes)))
+
+    warnings = []
+    roles: Dict[str, int] = {}
+    for note in notes:
+        roles[note.role] = roles.get(note.role, 0) + 1
+    if "melody" not in roles:
+        warnings.append("no note was identified as the melody — the tune has "
+                        "nothing to lead with")
+    if stats.simplified:
+        lost = ", ".join("%s %d" % (role, count)
+                         for role, count in sorted(stats.left_out.items(),
+                                                   key=lambda item: -item[1]))
+        warnings.append("%d note(s) were left out because every voice was busy (%s)"
+                        % (stats.simplified, lost or "no role recorded"))
+    if stats.left_out.get("melody"):
+        warnings.append("%d melody note(s) were left out — the tune itself lost "
+                        "notes" % stats.left_out["melody"])
+    if stats.folded:
+        warnings.append("%d note(s) were moved by whole octaves to fit the chip "
+                        "(the tune keeps its shape, but it sits elsewhere)"
+                        % stats.folded)
+    if stats.dropped:
+        warnings.append("%d note(s) were too short or too quiet to place"
+                        % stats.dropped)
+    if duration < 3.0:
+        warnings.append("this is only %.1f s long — it may be a jingle or a sound "
+                        "effect rather than a song" % duration)
+
+    levels = {}
+    if stems:
+        gains = mix.balance(stems, mix.channel_roles(grouped))
+        levels = mix.role_levels(stems, mix.channel_roles(grouped), gains)
+        melody = levels.get("melody")
+        if melody is not None:
+            rest = [value for role, value in levels.items() if role != "melody"]
+            if rest:
+                # add the other roles up the way an ear does: energy, not dB
+                total = sum(10 ** (value / 10.0) for value in rest)
+                together = 10 * math.log10(total) if total > 0 else -120.0
+                gap = melody - together
+                if gap < -6.0:
+                    warnings.append("the melody sits %.0f dB under the rest of the "
+                                    "mix — the tune will be hard to follow" % -gap)
+                elif gap < -2.0:
+                    warnings.append("the melody sits %.0f dB under the rest of the "
+                                    "mix" % -gap)
+                lines.append("  melody %.1f dB against the rest %.1f dB "
+                             "(%.1f dB apart)" % (melody, together, gap))
+    if levels:
+        shown = sorted(levels.items(), key=lambda item: -item[1])
+        lines.append("  voice levels: " + ", ".join(
+            "%s %.1f dB" % (role, value) for role, value in shown))
+    if roles:
+        lines.append("  roles placed: " + ", ".join(
+            "%s %d" % (role, count) for role, count in sorted(roles.items())))
+    for warning in warnings:
+        lines.append("  ! " + warning)
+    if not warnings:
+        lines.append("  nothing looks wrong: the melody leads, every note found a "
+                     "voice")
+    return lines
+
+
 def _convert(source: str, args, extensions, channels, multiple: bool = False,
              sequence: str = "", bank: str = "", base: bool = True) -> int:
     started = time.time()
@@ -187,12 +272,14 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
     for note in notes:
         grouped.setdefault(note.channel, []).append(note)
 
-    if args.stems_dir:
+    diagnose = bool(getattr(args, "diagnose", False))
+    if args.stems_dir or diagnose:
         pcm, stems, duration = render(notes, channels, render_options, grouped)
+    else:
+        pcm, stems, duration = render(notes, channels, render_options, grouped)
+    if args.stems_dir:
         written = write_stems(args.stems_dir, stems, render_options)
         print("  + %d per-channel stems in %s" % (len(written), args.stems_dir))
-    else:
-        pcm, _stems, duration = render(notes, channels, render_options, grouped)
 
     # a ROM holds many songs: the one that was converted belongs in the name
     song_label = getattr(song, "ds_song", "") if getattr(
@@ -220,6 +307,10 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
 
     elapsed = time.time() - started
     print("  > %s" % target)
+    if diagnose:
+        for line in _diagnosis(song, analysis, notes, stats, grouped, stems,
+                               duration):
+            print(line)
     if args.stats or args.verbose:
         print("  what the file contains:")
         for line in analysis.summary_lines():
@@ -255,6 +346,10 @@ def main(argv=None) -> int:
     parser.add_argument("--list-extensions", action="store_true",
                         help="show the chips and the channels they add, then exit")
     parser.add_argument("--stats", action="store_true", help="report what went where")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="say whether the tune is actually audible: which song "
+                             "was picked, what was left out, and where the melody "
+                             "sits against the rest of the mix")
     parser.add_argument("-v", "--verbose", action="store_true", help="same as --stats, plus source info")
     parser.add_argument("--export-vgm", action="store_true",
                         help="also write a .vgm log (plays in VGM-aware players)")
