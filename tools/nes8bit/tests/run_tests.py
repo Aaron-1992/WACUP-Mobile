@@ -1298,6 +1298,104 @@ def _grouped(result) -> dict:
     return grouped
 
 
+def recognition_test() -> None:
+    """Does the converter find the tune, the drums and the songs?
+
+    Three things have to be true of a game soundtrack, and each of them used to be
+    wrong in a way that made a conversion unrecognisable while looking fine in the
+    pattern page.
+    """
+    import make_test_rom as rom_tools
+    from nescore import nds
+    from nescore.demo import Track, BEAT, BAR, DIVISION
+
+    work = tempfile.mkdtemp(prefix="chip8bit-recog-")
+    print("finding the songs in a ROM with two sound archives")
+
+    # --- 1. a ROM can hold more than one SDAT, and the songs are in the second
+    two = rom_tools.write_two_archives(os.path.join(work, "two.nds"))
+    archive, _title = nds.open_archive(two)
+    names = [entry.name for entry in archive.sequences]
+    check("both archives are listed", len(names) == 3, str(names))
+    check("the songs from the second archive are there",
+          "BGM_MAIN" in names and "BGM_BOSS" in names, str(names))
+    song, archive, entry, bank = nds.load(two, "BGM_BOSS")
+    check("a song from the second archive keeps its own bank",
+          entry.bank == 1 and bank == 1, "entry %d chosen %d" % (entry.bank, bank))
+    check("and it still has its notes", len(song.notes) >= 3, str(len(song.notes)))
+
+    print("telling drums from music")
+
+    def part(program, notes):
+        return [Note(start=start, dur=dur, pitch=pitch, velocity=90, part=program,
+                     program=program) for start, dur, pitch in notes]
+
+    # a kit written as pitched notes: a handful of keys, four octaves apart,
+    # every hit short
+    kit = []
+    for beat in range(16):
+        kit.append((beat * 0.25, 0.05, [36, 38, 42, 96][beat % 4]))
+    drums = Song(notes=part(0, kit), tempo=120)
+    analysis = analyze.analyse(drums)
+    check("a drum track written as notes is recognised",
+          any(voice.role == "drum" for voice in analysis.voices),
+          str([(v.role, v.part) for v in analysis.voices]))
+
+    # one key hammered short, the way a kit is often split up
+    kick = Song(notes=part(0, [(beat * 0.25, 0.04, 36) for beat in range(24)]),
+                tempo=120)
+    analysis = analyze.analyse(kick)
+    check("a one-key drum track is recognised too",
+          any(voice.role == "drum" for voice in analysis.voices),
+          str([(v.role, v.part) for v in analysis.voices]))
+
+    # a real melody must not be mistaken for drums
+    scale = [72, 74, 76, 79, 81, 79, 76, 74]
+    tune = Song(notes=part(0, [(index * 0.25, 0.2, scale[index % len(scale)])
+                               for index in range(32)]), tempo=120)
+    analysis = analyze.analyse(tune)
+    check("a melody is not mistaken for drums",
+          not any(voice.role == "drum" for voice in analysis.voices),
+          str([v.role for v in analysis.voices]))
+
+    print("finding the tune")
+    # a sparkle line sits above the tune and used to be called the melody
+    lead = [(index * 0.25, 0.2, scale[index % len(scale)]) for index in range(32)]
+    sparkle = [(index * 2.0, 0.1, 96 + index % 3) for index in range(4)]
+    bed = [(bar * 2.0, 1.8, pitch) for bar in range(4) for pitch in (48, 52, 55)]
+    song = Song(notes=part(0, bed) + part(1, sparkle) + part(2, lead), tempo=120)
+    analysis = analyze.analyse(song)
+    melody = [voice for voice in analysis.voices if voice.role == "melody"]
+    check("the tune is the melody, not the line above it",
+          len(melody) == 1 and melody[0].part == 2,
+          str([(v.role, v.part, len(v.notes)) for v in analysis.voices]))
+    check("and the sparkle line is not thrown away as melody",
+          all(voice.part != 1 or voice.role != "melody" for voice in analysis.voices))
+
+    print("putting the tune on top")
+    levels = mix_module.audibility({"melody": mix_module.ROLE_TARGET["melody"],
+                                    "counter": mix_module.ROLE_TARGET["counter"],
+                                    "drum": mix_module.ROLE_TARGET["drum"]})
+    check("the melody is well above the counter line and the drums",
+          levels["gap"] > 3.0, str(levels))
+
+    # the whole path, on a busy tune: the melody has to survive arrangement
+    busy = _crowded_midi(os.path.join(work, "busy.mid"))
+    result = convert.convert_file(busy, convert.Settings(),
+                                  output_path=os.path.join(work, "busy.wav"))
+    melody_notes = [n for n in result.notes if n.role == "melody"]
+    grouped = _grouped(result)
+    check("the tune reaches the chips", len(melody_notes) >= 8, str(len(melody_notes)))
+    check("and it is not sharing a channel with the other parts",
+          len({note.channel for note in melody_notes}) == 1,
+          str(sorted({note.channel for note in melody_notes})))
+    check("no drum note is left on a melody channel",
+          not any(note.role == "drum" and note.channel in ("pulse1", "pulse2")
+                  for note in result.notes),
+          str(sorted({(n.role, n.channel) for n in result.notes})))
+    del grouped, DIVISION, BAR, BEAT, Track
+
+
 def theme_test() -> None:
     """The window has one look, and it is dark.
 
@@ -1380,6 +1478,7 @@ def _sf2_sample_range(data: bytes, chunks: dict, start: int, count: int) -> list
 
 if __name__ == "__main__":
     _code = main_test()
+    recognition_test()
     theme_test()
     if FAILURES:
         print("\n%d check(s) failed: %s" % (len(FAILURES), ", ".join(FAILURES)))

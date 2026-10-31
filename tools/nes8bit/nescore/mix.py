@@ -24,15 +24,21 @@ import math
 from typing import Dict, Iterable, List
 
 # Where each kind of line sits in the mix, relative to the lead, in dB.
+#
+# The tune has to be clearly on top. It was only 3 dB over the counter line and
+# 3 dB over the drums, and a four-voice console then leaves you with a wall of
+# accompaniment you cannot sing — "I can't make out the song". The gaps below are
+# wide enough to follow the melody over a busy drum part, and the melody itself
+# sits above 0 so the whole thing is not just "everything quieter".
 ROLE_TARGET = {
-    "melody": 0.0,
-    "counter": -3.5,
-    "rhythm": -5.0,
-    "harmony": -7.0,
-    "bass": -5.0,
-    "drum": -3.0,
+    "melody": 4.0,
+    "counter": -6.0,
+    "rhythm": -8.0,
+    "harmony": -10.0,
+    "bass": -6.0,
+    "drum": -4.5,
 }
-DEFAULT_TARGET = -6.0
+DEFAULT_TARGET = -8.0
 BASE_DB = -24.0            # where the lead sits before the final normalise
 MAX_CORRECTION = 14.0      # never let the equaliser rewrite the arrangement
 STRIDE = 8                 # loudness is measured on every 8th sample: fast, exact enough
@@ -70,15 +76,35 @@ def channel_roles(grouped: Dict[str, Iterable]) -> Dict[str, str]:
 
 def balance(stems: Dict[str, List[float]],
             roles: Dict[str, str]) -> Dict[str, float]:
-    """A linear gain per channel that puts every voice near its role's level."""
-    gains: Dict[str, float] = {}
+    """A linear gain per channel that puts every voice near its role's level.
+
+    The gains are **relative to the lead**, not absolute: the lead keeps whatever
+    level the renderer gave it and everything else is moved towards the gap its
+    role belongs at. Anchoring to an absolute decibel figure was a quiet
+    disaster — every correction was 12–16 dB, so they all hit the ±14 dB cap and
+    the result was every voice bunched together again, which is exactly the "I
+    can't make out the song" mix. The final normalise sets the overall loudness;
+    this stage is only ever about the shape.
+    """
+    measured: Dict[str, float] = {}
+    wanted: Dict[str, float] = {}
     for channel, buffer in stems.items():
         level = _active_level(buffer)
         if level <= 0.0:
-            gains[channel] = 1.0
             continue
-        target = BASE_DB + ROLE_TARGET.get(roles.get(channel, ""), DEFAULT_TARGET)
-        correction = target - 20.0 * math.log10(level)
+        measured[channel] = 20.0 * math.log10(level)
+        wanted[channel] = ROLE_TARGET.get(roles.get(channel, ""), DEFAULT_TARGET)
+    gains: Dict[str, float] = {channel: 1.0 for channel in stems}
+    if not measured:
+        return gains
+
+    # the lead is whichever voice sits highest in the role table: it is the thing
+    # to follow, so its own level is the reference every other voice is placed
+    # against
+    lead = max(measured, key=lambda channel: (wanted[channel], -measured[channel]))
+    for channel, level in measured.items():
+        correction = ((wanted[channel] - wanted[lead])
+                      - (level - measured[lead]))
         correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, correction))
         gains[channel] = 10.0 ** (correction / 20.0)
     return gains

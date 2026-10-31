@@ -21,7 +21,7 @@ MIDI uses a 48 division.
 
 import os
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 from .model import Note, Song
@@ -112,26 +112,46 @@ class Rom:
             raise NdsError("file %d has a broken table entry" % file_id)
         return self.data[start:end]
 
-    def find_sdat(self) -> bytes:
-        """Find the sound archive. Usually it is a plain file in the FAT."""
+    def find_sdats(self) -> List[bytes]:
+        """Every sound archive in the ROM, in file order.
+
+        A ROM does not have to hold one. New Super Mario Bros. ships two: a big
+        one with the soundtrack (52 sequences) and a small one with the
+        mini-games' jingles (33). Reading only the first archive found means the
+        song list is nothing but jingles, and the "song" somebody converts is a
+        two-second fanfare — which is exactly how a conversion comes out
+        unrecognisable while every note of it was placed correctly.
+        """
+        found: List[bytes] = []
         for file_id in range(self.file_count()):
             try:
                 blob = self.read_file(file_id)
             except NdsError:
                 continue
-            if blob[:4] == b"SDAT":
-                return blob
+            if blob[:4] == b"SDAT" and not any(blob is other for other in found):
+                found.append(blob)
+        if found:
+            return found
         # some ROMs keep it somewhere odd: fall back to a scan of the whole image
         at = self.data.find(b"SDAT\xff\xfe")
-        if at >= 0:
+        while at >= 0:
             blob = self.data[at:]
             if len(blob) >= 0x20:
                 declared = _u32(blob, 8)
-                if 0 < declared <= len(blob):
-                    return blob[:declared]
-                return blob
-        raise NdsError("no SDAT sound archive in this ROM (many games use a "
-                       "custom sound engine instead)")
+                found.append(blob[:declared] if 0 < declared <= len(blob) else blob)
+                at = self.data.find(b"SDAT\xff\xfe",
+                                    at + (declared or 4) if declared else at + 4)
+            else:
+                break
+        if not found:
+            raise NdsError("no SDAT sound archive in this ROM (many games use a "
+                           "custom sound engine instead)")
+        return found
+
+    def find_sdat(self) -> bytes:
+        """The biggest sound archive: the one most likely to hold the music."""
+        blobs = self.find_sdats()
+        return max(blobs, key=len)
 
 
 # ------------------------------------------------------------------- the SDAT
@@ -143,6 +163,10 @@ class SequenceEntry:
     bank: int
     volume: int
     sseq: bytes
+    #: How many banks were merged in before this sequence's own archive: a DS
+    #: sequence names its bank by index inside its own SDAT, so a ROM with two
+    #: archives needs that offset to find the right one.
+    bank_base: int = 0
 
 
 @dataclass
@@ -506,6 +530,11 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
     song.tempo = float(changes[0][1])           # did not pick a bank himself
     song.title = "SSEQ"
     song.track_names = ["Track %02d" % number for number, _ in starts]
+    # The "program change" of a DS sequence is a slot in the game's own bank, not
+    # a General MIDI number: slot 34 is whatever the bank put there. Saying so
+    # keeps the analysis from calling a bank slot "Fretless Bass" and then
+    # deciding a lead line is the bass.
+    song.programs_are_bank_slots = True
     song.refresh_duration()
     return song
 
@@ -1087,6 +1116,38 @@ def _sf2_bytes(pcm: bytearray, samples, instruments, bank_index: int,
 
 # --------------------------------------------------------------- the entry
 
+def merge_archives(archives: List["Archive"], name: str = "ROM") -> "Archive":
+    """Put several SDATs into one song list, with every index kept honest.
+
+    A sequence names its bank by index *within its own archive*, and a bank names
+    its wave archives the same way, so merging is not concatenation: both numbers
+    have to be shifted by how much has been merged already. Duplicate song names
+    (two archives with their own "BGM_BOSS") get a suffix, so picking one by name
+    is never a coin toss.
+    """
+    combined = Archive(name=name or "ROM")
+    seen_names: Dict[str, int] = {}
+    for archive in archives:
+        wave_base = (max(combined.waves) + 1) if combined.waves else 0
+        bank_base = len(combined.banks)
+        for sequence in archive.sequences:
+            name_of = sequence.name
+            count = seen_names.get(name_of.lower(), 0)
+            seen_names[name_of.lower()] = count + 1
+            if count:
+                name_of = "%s (%d)" % (name_of, count + 1)
+            combined.sequences.append(replace(
+                sequence, index=len(combined.sequences), name=name_of,
+                bank=bank_base + sequence.bank, bank_base=bank_base))
+        for bank in archive.banks:
+            combined.banks.append(replace(
+                bank, index=len(combined.banks),
+                wave_archives=[wave_base + wave for wave in bank.wave_archives]))
+        for wave_id, blob in archive.waves.items():
+            combined.waves[wave_base + wave_id] = blob
+    return combined
+
+
 def load(path: str, sequence: str = "", bank: str = "") -> Tuple[Song, Archive,
                                                                 SequenceEntry,
                                                                 int]:
@@ -1127,8 +1188,15 @@ def archive_from_bytes(data: bytes, path: str = "") -> Tuple[Archive, str]:
     if extension not in (".nds", ""):
         raise NdsError("not a DS ROM, SDAT or SSEQ")
     rom = Rom(data)
-    blob = rom.find_sdat()
-    return Archive.from_bytes(blob, rom.title), ""
+    archives = []
+    for blob in rom.find_sdats():
+        try:
+            archives.append(Archive.from_bytes(blob, rom.title))
+        except NdsError:
+            continue
+    if not archives:
+        raise NdsError("the sound archives in this ROM could not be read")
+    return merge_archives(archives, rom.title or "ROM"), ""
 
 
 def load_bytes(data: bytes, path: str = "", sequence: str = "",
@@ -1155,7 +1223,8 @@ def load_bytes(data: bytes, path: str = "", sequence: str = "",
     chosen_bank = int(bank) if str(bank).isdigit() else entry.bank
     asked_for = getattr(song, "ds_bank", None)
     if not str(bank).isdigit() and asked_for is not None:
-        chosen_bank = asked_for
+        # the sequence asked for a bank by its own archive's numbering
+        chosen_bank = entry.bank_base + asked_for
     if not (0 <= chosen_bank < len(archive.banks)) and archive.banks:
         chosen_bank = 0
     if 0 <= chosen_bank < len(archive.banks):

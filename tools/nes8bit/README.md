@@ -237,6 +237,14 @@ music and the instrument bank out of it, then converts the song like any other f
 * **the kit is found in the bank** — the instrument with one wave per key is the
   drum kit, and its notes become percussion instead of a bass line (see below).
 
+**A ROM can hold more than one sound archive, and the tool reads all of them.** New
+Super Mario Bros. has two: a small one with the mini-games' jingles and a large one
+with the soundtrack. Reading only the first archive found listed 33 jingles and no
+music, so the "song" a conversion picked was a two-second fanfare — every note
+correctly placed, nothing recognisable. It now merges every archive in the ROM into
+one song list (85 songs in that game), keeps each sequence pointing at the bank of
+its own archive, and numbers the list continuously.
+
 ![the song browser over the desk](docs/window-songs.png)
 
 Where the ROM keeps several songs, its row in `FILES TO CONVERT` shows which song it
@@ -330,11 +338,23 @@ the whole point of the tool.
    harmony, not automatically the tune.
 4. **Percussion is read as a drum kit**, piece by piece (kick, snare, rim, clap, hats,
    ride, crash, three toms, tambourine, shaker, cowbell, claves, bongos, congas), not
-   as one anonymous noise channel.
-5. **Articulation follows the playing**: legato lines are held through the joins so
+   as one anonymous noise channel. Where the file does not say a track is drums — a
+   DS sequence, or a MIDI written without channel 10 — the *shape* says it: a handful
+   of keys spread over four octaves, jumping between them instead of moving by step,
+   every hit short. A kit read as music used to be worse than a missing track: it was
+   four octaves wide, so it took the melody channels and played a burst of pitched
+   noise over a tune nobody could hear. A one-key track hammered short and low (a
+   kick, or a hi-hat on a fixed note) is recognised the same way.
+5. **The tune is the top line, not the highest track.** A melody is whatever the ear
+   follows, and the ear follows the highest sounding note most of the time, so that
+   is measured: for each track, the share of the song it spends holding the top note.
+   The old rule ("whichever line sits highest") handed the tune to a four-note
+   sparkle line an octave above it and then threw the real melody away as harmony.
+   A line that never changes pitch is never the tune, whatever its register.
+6. **Articulation follows the playing**: legato lines are held through the joins so
    the chip does not re-attack every note, repeated notes keep their attack, and
    detached lines stay detached.
-6. **Timbre follows the instrument**: pads get thin 12.5 % pulses, leads 25 %, bass
+7. **Timbre follows the instrument**: pads get thin 12.5 % pulses, leads 25 %, bass
    the triangle, and the file's own volume/expression controls keep quiet passages
    quiet.
 
@@ -428,11 +448,16 @@ skips.
 pulse at volume 15, the triangle at volume 15 and a sampled kit are not equally
 loud, and a MIDI file written at wildly different velocities arrives with the lead
 and the harmony 18 dB apart. After rendering, each voice is measured over the parts
-where it actually plays and nudged towards the level its role belongs at (lead on
-top, counter line 3.5 dB under it, drums 3 dB, bass 5, harmony 7). The correction is
-capped at 14 dB, so it fixes a broken balance without re-writing the arrangement.
-Measured on a full-band MIDI: **18 dB of spread before, 7 dB after** — and by
-design, not by accident.
+where it actually plays and nudged towards the level its role belongs at, measured
+against the lead: the drum kit **8.5 dB under it**, the counter line 10, the bass 10
+and the chord bed 14. Those gaps used to be half as wide (0, −3, −3.5, −5, −7),
+which is how a tune ends up buried under its own accompaniment on four voices: "it
+sounds weird and I can't make out the song". The correction is capped at 14 dB, so it
+fixes a broken balance without re-writing the arrangement — and it is a *relative*
+correction, because anchoring it to an absolute level made every voice hit the cap
+and arrive bunched together (that is the bug this paragraph used to describe as a
+feature). Measured on a full-band
+MIDI: **18 dB of spread before, 7 dB after** — and by design, not by accident.
 
 **Every instrument gets its own envelope.** A square wave with one generic fade does
 not sound like a clarinet, a piano or a pad. The MIDI program decides the shape:
@@ -454,7 +479,7 @@ restarting on every note.
 | VRC6 / MMC5 / FDS / N163 / PSG | sawtooth, extra pulses, and wavetables, each rendered the way its chip does it |
 | echo | **off by default** (`--echo` turns it on): a quiet tempo-aware delayed copy, two rows of the song's own grid at 7 % — the "second pulse" trick. It is a taste, and at 13 % it was too much of one |
 | master | gentle low-pass, DC blocker, light bus compression, the APU's non-linear mixer curve, then an adaptive peak limiter (0.72 of full scale on a sparse tune, backing off on a dense one) so the drums keep their punch without the whole mix being turned down for them |
-| result | 226 BPM full-band test tune: RMS 0.208 (was 0.198), short-term level spread 5.0 dB (was 6.8), no voice more than 7 dB off its role, and the true rests between phrases stay silent instead of being smeared over |
+| result | the built-in test tune: RMS 0.34, peak 0.95, short-term level spread 2.8 dB, every voice exactly where its role belongs (the counter line and the bass 10 dB under the melody, the kit 8.5 dB under), and the true rests between phrases stay silent instead of being smeared over |
 
 Samples are shipped as rendered audio, so there is no sample library to install —
 and no copyrighted sample data anywhere: the kit is maths.
@@ -463,9 +488,22 @@ and no copyrighted sample data anywhere: the kit is maths.
 
 A console with four voices cannot play a twenty-voice soundtrack, and when it runs
 out the tool has to choose: it keeps the tune and drops the chord bed, and it counts
-every note it drops. That is the usual reason a conversion is *correct* and still
-hard to follow, and it is why the window and the command line now say what happened
-instead of leaving you to guess.
+every note it drops. That is one reason a conversion is *correct* and still hard to
+follow — but it is not the only one, and the other two are worse because they make
+the tool sound broken:
+
+* **the songs were never found.** A ROM can hold several sound archives; only the
+  first was read, so the song list was all jingles and the "song" converted was a
+  two-second fanfare (see the DS section above);
+* **the drums were read as music.** A kit has no label when it is written out as
+  pitched notes, and a four-octave "melody" of kicks and hats buries the tune. It is
+  recognised by shape now, and it is not allowed near a melody channel;
+* **the tune was not the tune.** The highest track is often a sparkle line an octave
+  above the melody; picking that as the melody threw the real one away. The top line
+  is measured over the whole song now, and only one line is the tune.
+
+Which is why the window and the command line say what happened instead of leaving
+you to guess.
 
 In the window, the last line of the strip under the toolbar shows the first thing
 worth knowing about the conversion — `! 53 note(s) left out: every voice was busy`,

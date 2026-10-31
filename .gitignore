@@ -6,3 +6,21 @@ local.properties
 .kotlin/
 captures/
 ci/
+
+# game files are yours, and never the repository's: a ROM or a dumped soundtrack
+# cannot be published, so keep them out of the tree rather than trusting luck
+*.nds
+*.sdat
+*.sseq
+*.sbnk
+*.swar
+*.nsf
+*.spc
+*.gbs
+*.gym
+*.vgm
+*.vgz
+*.psf
+*.minipsf
+*.2sf
+*.zip

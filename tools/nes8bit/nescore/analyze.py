@@ -126,6 +126,92 @@ def _split_part(notes: List[Note], max_voices: int = 4) -> List[List[Note]]:
     return [v["notes"] for v in voices if v["notes"]]
 
 
+def _looks_like_percussion(notes: List[Note]) -> bool:
+    """Whether a whole track is a drum kit written out as pitched notes.
+
+    A DS sequence (and plenty of MIDI files) put the drums on ordinary note
+    numbers: 36 is a kick, 38 a snare, 42 a closed hat. Nothing in the file says
+    "these are drums", and a drum track read as music is the worst thing that can
+    happen to a conversion — it spans four octaves, so the arranger hands it the
+    melody channels and the result is a burst of pitched noise over a tune you
+    cannot hear.
+
+    The shape gives it away: a kit uses a handful of keys spread over several
+    octaves, jumps between them instead of moving stepwise, and every hit is
+    short. No melodic line does all three.
+    """
+    if len(notes) < 8:
+        return False
+    pitches = sorted(note.pitch for note in notes)
+    spread = pitches[-1] - pitches[0]
+    distinct = len(set(pitches))
+    ordered = sorted(notes, key=lambda note: note.start)
+    lengths = sorted(note.dur for note in ordered)
+    median = lengths[len(lengths) // 2]
+
+    # A kit is often split into one track per piece — a kick track that plays a
+    # single key, a snare track that plays another. One key hammered short and
+    # often, in the low half of the keyboard, is a drum part and nothing else.
+    if distinct <= 2 and median < 0.25 and max(pitches) < 60:
+        return True
+
+    if spread < 48 or distinct > 24:
+        return False
+    steps = sum(1 for before, after in zip(ordered, ordered[1:])
+                if abs(after.pitch - before.pitch) <= 2)
+    if steps > 0.45 * max(1, len(ordered) - 1):
+        return False
+    return median < 0.5
+
+
+def _top_line_shares(parts: Dict[int, List[Note]],
+                     step: float = 0.025) -> Dict[int, float]:
+    """How often each track holds the highest sounding note, as a share of time.
+
+    This is the one reliable way to find the tune without hearing it: whatever a
+    file calls its tracks, the melody is the line the ear follows, and the ear
+    follows the top. A chord bed shares that job between its notes; a lead owns it.
+    """
+    events = []
+    for part, notes in parts.items():
+        for note in notes:
+            if note.role == "drum":
+                continue
+            events.append((note.start, 1, part, note.pitch))
+            events.append((note.end(), -1, part, note.pitch))
+    if not events:
+        return {}
+    events.sort(key=lambda item: item[0])
+    latest = max(event[0] for event in events)
+    active: Dict[int, List[int]] = {}
+    wins: Dict[int, int] = {}
+    total = 0
+    index = 0
+    moment = 0.0
+    while moment < latest:
+        while index < len(events) and events[index][0] <= moment:
+            _when, kind, part, pitch = events[index]
+            if kind > 0:
+                active.setdefault(part, []).append(pitch)
+            else:
+                try:
+                    active.get(part, []).remove(pitch)
+                except ValueError:
+                    pass
+            index += 1
+        best = None
+        for part, pitches in active.items():
+            if pitches and (best is None or max(pitches) > best[1]):
+                best = (part, max(pitches))
+        if best is not None:
+            wins[best[0]] = wins.get(best[0], 0) + 1
+            total += 1
+        moment += step
+    if not total:
+        return {}
+    return {part: count / float(total) for part, count in wins.items()}
+
+
 def _features(notes: List[Note], voice_index: int) -> Dict[str, float]:
     ordered = sorted(notes, key=lambda n: n.start)
     span = max(n.end() for n in ordered) - ordered[0].start
@@ -205,9 +291,20 @@ def analyse(song: Song) -> Analysis:
     for note in song.notes:
         parts.setdefault(note.part, []).append(note)
 
+    # A track that is really a drum kit has to be recognised before anything else
+    # looks at its register: a kit spans four octaves and would otherwise be
+    # taken for the melody.
+    for notes in parts.values():
+        if notes and notes[0].role != "drum" and _looks_like_percussion(notes):
+            for note in notes:
+                note.role = "drum"
+
     # chords: how often three or more notes of one track sound together
     analysis.chord_moments = _count_chords(parts)
     analysis.simultaneous = _max_simultaneous(parts)
+
+    bank_slots = bool(getattr(song, "programs_are_bank_slots", False))
+    top_shares = _top_line_shares(parts)
 
     voices: List[Voice] = []
     percussion = False
@@ -241,13 +338,13 @@ def analyse(song: Song) -> Analysis:
             voice.stepwise = features["stepwise"]
             voice.repeated = features["repeated"]
             voice.chord_tone = bool(index)
-            voice.scores = _score_roles(features, program)
+            voice.scores = _score_roles(features, 0 if bank_slots else program)
             voice.role = max(voice.scores, key=lambda role: voice.scores[role])
             voice.salience = (voice.scores.get(voice.role, 0.0)
                               + 0.5 * len(line) ** 0.5)
             voices.append(voice)
 
-    _settle_roles(voices, percussion)
+    _settle_roles(voices, percussion, top_shares)
 
     for voice in voices:
         for note in voice.notes:
@@ -269,26 +366,41 @@ def analyse(song: Song) -> Analysis:
     return analysis
 
 
-def _settle_roles(voices: List[Voice], percussion: bool) -> None:
-    """Make the result musical: there has to be one tune and one bass."""
+def _settle_roles(voices: List[Voice], percussion: bool,
+                  top_shares: Dict[int, float]) -> None:
+    """Make the result musical: there has to be one tune and one bass.
+
+    The tune is chosen by the top line first (whoever holds the highest sounding
+    note most of the time), because register alone gets it wrong the moment a file
+    has a sparkle line above the tune, and the old rule picked exactly that: a
+    handful of very high notes became "the melody" while the real tune was filed
+    as harmony and then thrown away by a four-voice console.
+    """
     melodic = [v for v in voices if v.role != "drum"]
     if not melodic:
         return
 
-    melodies = [v for v in melodic if v.role == "melody"]
-    if not melodies:
-        # promote the voice that most looks like a tune: high and moving
-        candidate = max(melodic, key=lambda v: (v.scores.get("melody", 0.0),
-                                                v.register))
-        if candidate.scores.get("melody", 0) > 0:
-            candidate.role = "melody"
-            melodies = [candidate]
+    def spread(voice: Voice) -> int:
+        pitches = [note.pitch for note in voice.notes]
+        return max(pitches) - min(pitches) if pitches else 0
 
-    if melodies:
-        # only the most prominent one keeps the name; the rest are inner lines
-        melodies.sort(key=lambda v: (-v.register, -len(v.notes)))
-        for extra in melodies[1:]:
-            extra.role = "harmony" if extra.chord_tone else "counter"
+    def prominence(voice: Voice) -> float:
+        # a line that never changes pitch is a hi-hat written on a note number,
+        # not the tune, however high it sits
+        if spread(voice) < 5:
+            return -1.0
+        share = top_shares.get(voice.part, 0.0) if not voice.chord_tone else 0.0
+        weight = min(1.0, len(voice.notes) / 24.0)
+        return 4.0 * share + 2.0 * weight + 0.01 * voice.register
+
+    contender = max(melodic, key=prominence)
+    if prominence(contender) > 0 and contender.register >= 45:
+        # one tune, and it is the line the ear would follow
+        for voice in melodic:
+            if voice is contender:
+                voice.role = "melody"
+            elif voice.role == "melody":
+                voice.role = "harmony" if voice.chord_tone else "counter"
 
     basses = [v for v in melodic if v.role == "bass"]
     if not basses:

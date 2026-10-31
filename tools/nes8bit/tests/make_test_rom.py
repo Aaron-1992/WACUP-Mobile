@@ -485,12 +485,19 @@ def build_sdat(sequences=None, sbnk: bytes = b"", swar: bytes = b"",
 
 # ---------------------------------------------------------------------- the ROM
 
-def build_rom(path: str, sdat: bytes = b"") -> str:
-    """Write a minimal .nds whose file table holds one file: the SDAT."""
+def build_rom(path: str, sdat: bytes = b"", extra: bytes = b"") -> str:
+    """Write a minimal .nds whose file table holds one file: the SDAT.
+
+    ``extra`` puts a second file into the table — another SDAT, if the test wants
+    a ROM like New Super Mario Bros., which ships a soundtrack archive *and* a
+    mini-games archive, and where reading only the first one gives a song list of
+    nothing but jingles.
+    """
     sdat = sdat or build_sdat()
+    files = [sdat] + ([extra] if extra else [])
     header_size = 0x4000
     fat_off = 0x200
-    fat_size = 8
+    fat_size = 8 * len(files)
     file_off = fat_off + 0x100
 
     rom = bytearray(header_size)
@@ -504,16 +511,34 @@ def build_rom(path: str, sdat: bytes = b"") -> str:
     struct.pack_into("<I", rom, 0x50, fat_off + 0x100)  # ARM9 ram offset
     struct.pack_into("<I", rom, 0x54, 4)
     struct.pack_into("<I", rom, 0x68, 0)               # no banner
-    struct.pack_into("<I", rom, 0x80, header_size + len(sdat))
+    struct.pack_into("<I", rom, 0x80, header_size +
+                     sum(len(blob) for blob in files))
 
     rom += b"\x00" * (fat_off - len(rom))
-    rom += struct.pack("<II", file_off, file_off + len(sdat))
+    at = file_off
+    for blob in files:
+        rom += struct.pack("<II", at, at + len(blob))
+        at += len(blob)
     rom += b"\x00" * (file_off - len(rom))
-    rom += sdat
+    for blob in files:
+        rom += blob
 
     with open(path, "wb") as handle:
         handle.write(bytes(rom))
     return path
+
+
+def write_two_archives(path: str) -> str:
+    """A ROM with two sound archives, the way New Super Mario Bros. has them.
+
+    The first archive is the small one (one jingle), the second holds the songs.
+    A reader that stops at the first SDAT it finds will list the jingle and
+    nothing else — which is the bug this file exists to catch.
+    """
+    jingles = build_sdat(sequences=[("NCS_BGM_MINIGAME", build_sseq())])
+    music = build_sdat(sequences=[("BGM_MAIN", build_sseq()),
+                                  ("BGM_BOSS", build_short_sseq())])
+    return build_rom(path, jingles, extra=music)
 
 
 def write(path: str, two_songs: bool = False) -> str:
