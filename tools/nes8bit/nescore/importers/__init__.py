@@ -128,16 +128,26 @@ def module_of(importer):
     return sys.modules.get(getattr(importer, "__module__", ""))
 
 
-def catalogue(path: str):
+def catalogue(path: str, length: bool = False):
     """List the songs a file holds, when its format has more than one.
 
     Only DS archives can answer; everything else returns None, which is the
-    answer the song browser needs ("this file has no songs to choose").
+    answer the song browser needs ("this file has no songs to choose"). With
+    ``length`` the archive also decodes every sequence to say how long each song
+    is — the window asks for that, because a list of internal names alone does
+    not tell anyone which one is the tune they mean.
     """
     _load_builtin()
     module = module_of(find_for(path))
     reader = getattr(module, "catalogue", None)
-    return reader(path) if reader else None
+    if reader is None:
+        return None
+    try:
+        return reader(path, length=length)
+    except TypeError:
+        if not length:
+            raise
+        return reader(path)
 
 
 def read_source(path: str, settings=None):

@@ -249,9 +249,13 @@ its own archive, and numbers the list continuously.
 
 Where the ROM keeps several songs, its row in `FILES TO CONVERT` shows which song it
 will convert out of how many (`1/24  BGM_MAIN`) and a **SONGS** button opens the song
-browser: every sequence in the archive, numbered, with its bank, the current one
-marked, a scroll wheel for long archives and a bank box for the odd song that uses a
-different bank. Pick with the mouse (a double click takes it), `↑` `↓` `PageUp`
+browser: every sequence in the archive, numbered, with its bank, **how long it is**
+(**13:45**), the current one marked, a scroll wheel for long archives and a bank box
+for the odd song that uses a different bank. The lengths matter, because a game's
+song list is half jingles and half music: the browser decodes the archive off the
+drawing thread when the file is added and says how many songs are jingles under ten
+seconds, so "which one is the tune" is a question about minutes rather than about
+internal names like `BGM_AMB_WATER` (which, it turns out, has no notes at all). Pick with the mouse (a double click takes it), `↑` `↓` `PageUp`
 `PageDown` `Home` `End` then `ENTER`, or type the first letters of a song's name to
 jump to it, or `ESC` to leave it as it was. *ADD ALL SONGS*
 queues every song in the archive as its own row, so a whole soundtrack converts in
@@ -266,6 +270,16 @@ chip8bit-cli.exe --cli --list-songs rom.nds
 chip8bit-cli.exe --cli rom.nds --sequence "BGM_BOSS" --stats
 chip8bit-cli.exe --cli rom.nds --sequence 12 --bank 3 --stats
 chip8bit-cli.exe --cli rom.nds --all-songs --stats
+```
+
+`--list-songs` prints the same list as the browser, one line per song, with its
+length, its note count and a word for what it is — `jingle` under ten seconds,
+`nothing to convert` for the ambience slots a lot of DS games leave in the archive:
+
+```
+ 33  bank 41  BGM_VS_CHIJOU           102.3 s  1082 notes
+ 37  bank 30  BGM_COURSE_CLEAR          6.1 s   112 notes  jingle
+ 69  bank 99  BGM_AMB_WATER              nothing to convert
 ```
 
 `--all-songs` converts the whole soundtrack in one go, each song into its own

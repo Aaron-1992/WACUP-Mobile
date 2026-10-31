@@ -903,6 +903,27 @@ def main_test() -> None:
     check("the catalogue says which song comes out by default",
           catalogue["chosen"] == "BGM_MAIN", str(catalogue.get("chosen")))
 
+    print("which song is which (the lengths the browser now shows)")
+    measured = importers.catalogue(two_songs, length=True)
+    lengths = measured.get("lengths") or {}
+    check("every song gets a length and a note count",
+          len(lengths) == 2 and all(entry[0] and entry[1]
+                                    for entry in lengths.values()), str(lengths))
+    check("and the length is the song's own, not a guess",
+          abs(lengths[0][0] - nds.load(two_songs, "BGM_MAIN")[0].duration) < 0.2,
+          str(lengths[0]))
+    check("a name list alone still costs no decoding",
+          "lengths" not in importers.catalogue(two_songs),
+          str(list(importers.catalogue(two_songs))))
+    listing = io.StringIO()
+    with contextlib.redirect_stdout(listing):
+        main(["--list-songs", two_songs])
+    printed = listing.getvalue()
+    check("--list-songs prints the length and the note count",
+          " s " in printed and "notes" in printed, printed[:200])
+    check("--list-songs calls a short song a jingle",
+          "jingle" in printed, printed[:200])
+
     single = make_test_rom.write(os.path.join(work, "one.nds"))
     one = importers.catalogue(single)
     check("a one-song ROM lists its one song",

@@ -121,12 +121,27 @@ def _song_list(importer, item: str):
 
 
 def _list_songs(inputs) -> int:
-    """Print the songs a DS ROM holds, with the bank each one uses."""
+    """Print the songs a DS ROM holds, with the bank each one uses.
+
+    A bare list of names is not much help when the names are the game's own
+    internal ones: "BGM_ATHLETIC" and "BGM_AMB_WATER" look equally promising
+    until you know that one is a four-minute tune and the other is an ambience
+    loop with no notes in it at all. So each song also gets its length, its note
+    count, and a word for what it is — a tune, a jingle, or nothing to convert.
+    """
     found = False
     for item in inputs:
         try:
             importer = importers.find_for(item)
+            module = importers.module_of(importer)
             songs = _song_list(importer, item)
+            lengths = {}
+            read_lengths = getattr(module, "song_lengths", None) if module else None
+            if read_lengths is not None:
+                try:
+                    lengths = read_lengths(item)
+                except Exception:
+                    lengths = {}
         except Exception as error:
             print("%s: %s" % (item, error))
             continue
@@ -134,13 +149,38 @@ def _list_songs(inputs) -> int:
         print("%s - %d song%s" % (os.path.basename(item), len(songs),
                                   "" if len(songs) == 1 else "s"))
         for index, bank, name in songs:
-            print("  %3d  bank %2d  %s" % (index, bank, name))
+            seconds, notes, why = lengths.get(index, (None, 0, ""))
+            if seconds is None:
+                detail = "   nothing to convert" if why else ""
+            else:
+                detail = "%6.1f s %5d notes%s" % (
+                    seconds, notes, "  jingle" if seconds < 10.0 else "")
+            print("  %3d  bank %2d  %-24s %s" % (index, bank, name, detail))
         print("  (pick one with --sequence NAME, or --sequence with the number "
               "above)")
+        if lengths:
+            jingles = sum(1 for index, _bank, _name in songs
+                          if (lengths.get(index) or (None,))[0] is not None
+                          and (lengths.get(index) or (99,))[0] < 10.0)
+            empty = len(songs) - sum(1 for index, _b, _n in songs
+                                     if (lengths.get(index) or (None,))[0] is not None)
+            if jingles or empty:
+                print("  (%d jingle%s under ten seconds, %d with no notes to "
+                      "convert)" % (jingles, "" if jingles == 1 else "s", empty))
     if not found:
         print("no DS ROM, SDAT or SSEQ found")
         return 1
     return 0
+
+
+def _short_reason(text: str) -> str:
+    """A reader's complaint, cut down to something that fits in a column."""
+    lowered = (text or "").strip()
+    if "no notes" in lowered:
+        return "an ambience loop or an empty slot"
+    if "no tracks" in lowered:
+        return "an ambience loop or an empty slot"
+    return lowered[:48] or "unreadable"
 
 
 def _diagnosis(song, analysis, notes, stats, grouped, stems, duration):

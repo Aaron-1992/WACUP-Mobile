@@ -66,30 +66,51 @@ def assets(path: str, directory: str, stem: str) -> List[str]:
         return []
 
 
-def catalogue(path: str):
+def catalogue(path: str, length: bool = False):
     """Everything the song browser lists, without converting anything.
 
     Returns {name, songs: [(index, bank, name)], banks, waves, chosen}: the songs
     with the bank each one asks for, how many banks and wave archives the archive
     holds, and which song the reader would pick on its own.
+
+    With ``length`` it also decodes every sequence (a second or so on a big ROM)
+    and reports how long each one is and how many notes it has — because a song
+    list of nothing but names does not tell anyone which one is the tune they
+    mean, and half of a game's "songs" are two-second jingles.
     """
     try:
         archive, _title = nds.open_archive(path)
     except nds.NdsError as error:
         raise ValueError(str(error))
     chosen = archive.best_sequence()
-    return dict(
+    listing = dict(
         name=archive.name,
         songs=[(item.index, item.bank, item.name) for item in archive.sequences],
         banks=len(archive.banks),
         waves=len(archive.waves),
         chosen=chosen.name,
     )
+    if length:
+        lengths = {}
+        for item in archive.sequences:
+            try:
+                song = nds.read_sequence(item.sseq)
+            except nds.NdsError as error:
+                lengths[item.index] = (None, 0, str(error))
+                continue
+            lengths[item.index] = (song.duration, len(song.notes), "")
+        listing["lengths"] = lengths
+    return listing
 
 
 def songs(path: str):
     """Every song in a DS file as (index, bank, name), for listing and picking."""
     return catalogue(path)["songs"]
+
+
+def song_lengths(path: str):
+    """How long each song is and how many notes it has: {index: (s, notes, why)}."""
+    return catalogue(path, length=True)["lengths"]
 
 
 def describe(path: str) -> str:

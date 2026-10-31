@@ -106,6 +106,23 @@ def _channel_short(channel: str) -> str:
     return channel[:4].upper()
 
 
+def _song_clock(catalogue, index: int) -> str:
+    """A song's length as m:ss, when the archive has been measured."""
+    lengths = (catalogue or {}).get("lengths") or {}
+    seconds = (lengths.get(index) or (None,))[0]
+    if not seconds:
+        return ""
+    seconds = int(round(seconds))
+    return "%d:%02d" % (seconds // 60, seconds % 60)
+
+
+def _jingle_count(catalogue) -> int:
+    """How many of those songs are two-second jingles rather than music."""
+    lengths = (catalogue or {}).get("lengths") or {}
+    return sum(1 for entry in lengths.values()
+               if entry and entry[0] is not None and entry[0] < 10.0)
+
+
 def _fit(font, text: str, width: int) -> str:
     if font.size(text)[0] <= width:
         return text
@@ -357,6 +374,7 @@ class App:
 
     # ------------------------------------------------------------ song browser
 
+
     def read_catalogue(self, item: QueueItem) -> None:
         """List the songs inside a DS file, off the drawing thread."""
         if item.catalogue is not None or item.catalogue_reading:
@@ -372,7 +390,10 @@ class App:
         catalogue = None
         note = ""
         try:
-            catalogue = importers.catalogue(path)
+            # with the lengths: a list of nothing but names does not tell
+            # anyone which one is the tune they mean, and this runs off the
+            # drawing thread so it costs no frames
+            catalogue = importers.catalogue(path, length=True)
             if catalogue is None:
                 note = "this file holds no songs to list"
         except Exception as error:                 # a bad file must not crash
@@ -2206,6 +2227,10 @@ class App:
                 len(catalogue["songs"]), "" if len(catalogue["songs"]) == 1 else "s",
                 catalogue["banks"], "" if catalogue["banks"] == 1 else "s",
                 catalogue["waves"], "" if catalogue["waves"] == 1 else "s")
+            jingles = _jingle_count(catalogue)
+            if jingles:
+                summary += " · %d jingle%s" % (jingles,
+                                               "" if jingles == 1 else "s")
         elif item.catalogue_note:
             summary = item.catalogue_note
         else:
@@ -2252,9 +2277,20 @@ class App:
                                                   else t.field_text)
             self.screen.blit(bank_text, (row.x + 34, row.y + 3))
             chosen = name.lower() == item.song().lower()
+            clock = _song_clock(catalogue, _index)
+            clock_width = self.fonts["tiny"].size(clock)[0] if clock else 0
+            # the length sits in its own column, clear of the CURRENT tag, and
+            # the name stops before it instead of running underneath
+            clock_x = row.right - 88 - clock_width
+            room = (clock_x - 10) - (row.x + 100) if clock else row.width - 150
             self._text(row.x + 100, row.y + 1,
-                       _fit(self.fonts["body"], name, row.width - 210), "body",
+                       _fit(self.fonts["body"], name, room), "body",
                        t.playing_text if selected else t.field_text)
+            if clock:
+                surface = self.fonts["tiny"].render(clock, t.smooth,
+                                                    t.playing_text if selected
+                                                    else t.pattern_vol)
+                self.screen.blit(surface, (clock_x, row.y + 3))
             if chosen:
                 tick = self.fonts["tiny"].render("CURRENT", t.smooth,
                                                  t.playing_text if selected
