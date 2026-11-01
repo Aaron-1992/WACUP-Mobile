@@ -24,3 +24,10 @@ ci/
 *.minipsf
 *.2sf
 *.zip
+
+# a game's own music, dumped or converted, is not ours to publish
+*.mid
+*.midi
+*.wav
+*.sf2
+game-files/
