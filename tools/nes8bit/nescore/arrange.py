@@ -470,9 +470,11 @@ def arrange(song: Song, channels: List[ChannelSpec], options: Options,
 
         drum = note.role == "drum"
         if drum:
-            kind, sample = gm.percussion(note.pitch)
-            note.drum = sample if sample else _drum_kind(note.pitch)
-            period, short = DRUM_MAP.get(note.pitch, (9, False))
+            # the console plays the piece, not the key the game happened to write
+            piece = note.drum_piece if note.drum_piece >= 0 else note.pitch
+            kind, sample = gm.percussion(piece)
+            note.drum = sample if sample else _drum_kind(piece)
+            period, short = DRUM_MAP.get(piece, (9, False))
             note.noise_period = period
             note.noise_short = short
 

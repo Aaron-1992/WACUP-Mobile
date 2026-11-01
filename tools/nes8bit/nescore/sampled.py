@@ -66,6 +66,8 @@ class SampleRender:
     instruments: int = 0
     drums: int = 0
     channels: int = 1                  # 2 when stereo: the PCM is interleaved
+    peak_voices: int = 0               # most notes sounding at one moment
+    held_over: int = 0                 # note pairs a track would have overlapped
     tracks: Dict[str, List[Note]] = None
 
 
@@ -190,9 +192,18 @@ def _voice_gain(note: Note) -> float:
     return (velocity ** 1.5) * max(0.0, min(1.0, float(note.expression or 1.0)))
 
 
+#: How long a note takes to let go when the next note on its track arrives. The
+#: DS sequence player gives each track one channel, so a new note stops the old one;
+#: without that, every note's release rings on under the following ones and a fast
+#: tune turns into a wash of pitches — "a mess of notes" is exactly what it sounds
+#: like. 8 ms is short enough to be inaudible as a cut and long enough to avoid a
+#: click.
+CUT_FADE = 0.008
+
+
 def _add_note(left: List[float], right: List[float], note: Note,
               zone: nds.Zone, wave: Optional[dict], rate: int, gain: float,
-              max_seconds: float) -> int:
+              max_seconds: float, cut_at: Optional[float] = None) -> int:
     """Mix one note into the two channel buffers; returns 1 if it made a sound."""
     start = note.start
     duration = max(0.01, note.dur)
@@ -211,7 +222,7 @@ def _add_note(left: List[float], right: List[float], note: Note,
 
     if wave is None:
         return _add_psg(left, right, note, zone, rate, volume, pan_left,
-                        pan_right, attack, decay, sustain, release)
+                        pan_right, attack, decay, sustain, release, cut_at)
 
     pcm = wave["pcm"]
     length = len(pcm)
@@ -227,9 +238,15 @@ def _add_note(left: List[float], right: List[float], note: Note,
         return 0
 
     first = int(round(start * rate))
-    total = min(len(left), max(0, int(round((start + duration + release) * rate))))
+    ending = start + duration + release
+    if cut_at is not None and cut_at < ending:
+        # the next note on this track takes the channel: this one stops there
+        ending = max(start + 0.002, cut_at)
+    total = min(len(left), max(0, int(round(ending * rate))))
     if first >= total:
         return 0
+    fade_from = total - int(round(CUT_FADE * rate)) if cut_at is not None else total
+    fade_from = max(first, fade_from)
 
     phase = 0.0
     index = first
@@ -271,6 +288,8 @@ def _add_note(left: List[float], right: List[float], note: Note,
             fraction = phase - position
             start_value = pcm[position]
             value = start_value + (pcm[following] - start_value) * fraction
+            if index >= fade_from:
+                value *= 1.0 - (index - fade_from) / max(1.0, total - fade_from)
             left[index] += value * amp_left
             if stereo:
                 right[index] += value * amp_right
@@ -286,7 +305,8 @@ def _add_note(left: List[float], right: List[float], note: Note,
 
 def _add_psg(left: List[float], right: List[float], note: Note, zone: nds.Zone,
              rate: int, volume: float, pan_left: float, pan_right: float,
-             attack: float, decay: float, sustain: float, release: float) -> int:
+             attack: float, decay: float, sustain: float, release: float,
+             cut_at: Optional[float] = None) -> int:
     """A bank slot with no sample behind it: a PSG square, the way the DS makes it.
 
     DS banks mix real "chip" instruments in with the samples, and those are just
@@ -301,9 +321,14 @@ def _add_psg(left: List[float], right: List[float], note: Note, zone: nds.Zone,
         return 0
     duration = max(0.01, note.dur)
     first = int(round(note.start * rate))
-    total = min(len(left), int(round((note.start + duration + release) * rate)))
+    ending = note.start + duration + release
+    if cut_at is not None and cut_at < ending:
+        ending = max(note.start + 0.002, cut_at)
+    total = min(len(left), int(round(ending * rate)))
     if first >= total:
         return 0
+    fade_from = max(first, total - int(round(CUT_FADE * rate))
+                    if cut_at is not None else total)
     period = rate / frequency
     index = first
     phase = 0.0
@@ -319,6 +344,8 @@ def _add_psg(left: List[float], right: List[float], note: Note, zone: nds.Zone,
         end = index + block
         while index < end:
             value = (1.0 if (phase % period) < period * duty else -1.0)
+            if index >= fade_from:
+                value *= 1.0 - (index - fade_from) / max(1.0, total - fade_from)
             value *= level * volume * 0.55
             left[index] += value * pan_left
             if right is not None:
@@ -340,12 +367,24 @@ def render_song(song: Song, archive: "nds.Archive", bank_index: int,
     notes = [note for note in song.notes if note.dur > 0.0]
     if not notes:
         return SampleRender(rate=rate)
-    end = max(note.end() for note in notes) + 0.05
+    # the last note's release has to fit: a buffer that stops 50 ms after the last
+    # note-off chops the ending off every song
+    end = max(note.end() for note in notes) + RELEASE_SLOW + 0.05
     if options.max_seconds:
         end = min(end, options.max_seconds)
     total = int(round(end * rate))
     left = [0.0] * total
     right = [0.0] * total if options.stereo else None
+
+    # A track is monophonic on the DS: the next note takes the channel, so each
+    # note has to know where the one after it on the same track begins. Without
+    # that, every note's release rings on under the following ones and a fast
+    # tune turns into a wash of pitches.
+    cut_at: Dict[int, float] = {}
+    upcoming: Dict[int, float] = {}
+    for note in sorted(notes, key=lambda item: item.start, reverse=True):
+        cut_at[id(note)] = upcoming.get(int(note.part), 1e9)
+        upcoming[int(note.part)] = note.start
 
     played = skipped = synthetic = 0
     for note in notes:
@@ -357,7 +396,7 @@ def render_song(song: Song, archive: "nds.Archive", bank_index: int,
             skipped += 1
             continue
         made = _add_note(left, right, note, zone, wave, rate, 1.0,
-                         options.max_seconds)
+                         options.max_seconds, cut_at.get(id(note)))
         played += made
         synthetic += 1 if (made and wave is None) else 0
 
@@ -394,13 +433,46 @@ def render_song(song: Song, archive: "nds.Archive", bank_index: int,
         for channel in channels:
             channel[:] = [value * scale for value in channel]
 
+    sounding, held = _voice_stats(notes, cut_at)
     pcm = _pcm_bytes(channels, rate)
     return SampleRender(pcm=pcm, seconds=seconds, rate=rate,
                         voices=len(tracks), notes_played=played,
                         notes_skipped=skipped, synthetic=synthetic,
+                        peak_voices=sounding, held_over=held,
                         instruments=bank.instrument_count(),
                         drums=len(bank.kits),
                         channels=2 if options.stereo else 1, tracks=tracks)
+
+
+def _voice_stats(notes: List[Note], cut_at: Dict[int, float]) -> Tuple[int, int]:
+    """How many notes sound at once, and how many notes had to be stopped early.
+
+    A DS track is monophonic, so the first number can never exceed the number of
+    tracks. If it does, the render is stacking release tails that the hardware
+    would have stopped — which is the difference between a tune and a wash of
+    pitches, and the thing that made a busy song sound like a mess of notes.
+    """
+    spans = []
+    for note in notes:
+        ending = min(note.end() + RELEASE_SLOW, cut_at.get(id(note), 1e9))
+        ending = max(ending, note.start + 0.001)
+        spans.append((note.start, 1))
+        spans.append((ending, -1))
+    spans.sort()
+    live = peak = 0
+    for _moment, delta in spans:
+        live += delta
+        peak = max(peak, live)
+    held = 0
+    per_track: Dict[int, List[Note]] = {}
+    for note in notes:
+        per_track.setdefault(int(note.part), []).append(note)
+    for items in per_track.values():
+        items.sort(key=lambda item: item.start)
+        for before, after in zip(items, items[1:]):
+            if after.start < before.end():
+                held += 1
+    return peak, held
 
 
 def group_tracks(notes: List[Note]) -> Dict[str, List[Note]]:

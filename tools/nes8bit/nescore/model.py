@@ -20,6 +20,10 @@ class Note:
     expression: float = 1.0  # CC7 volume x CC11 expression, 0..1
     track_name: str = ""    # the name in the MIDI file, if it had one
     voice: int = -1         # monophonic line this note belongs to (see analyze)
+    # The key the source file actually wrote. A DS drum track is often moved onto
+    # General MIDI keys so the chip arrangement can name the pieces — but the
+    # bank's own kit is keyed its own way, so playing it back has to use this.
+    bank_pitch: int = -1
 
     # filled in by the arranger
     channel: str = ""
@@ -36,6 +40,12 @@ class Note:
     # bank says what its instruments actually are, by holding their samples
     envelope: str = ""      # a FAMILY_ENVELOPE name, from the instrument's own shape
     duty_fixed: bool = False   # the duty below came from the sample, not from GM
+    # Which kick/snare/hat this is, when the source is a drum kit keyed its own way.
+    # The key itself is never rewritten: a DS bank's kit answers to the keys the
+    # game wrote, and moving a note onto a General MIDI key to name the piece would
+    # silently re-pitch every drum and — when an instrument was mistaken for a kit —
+    # every melody note on it too.
+    drum_piece: int = -1
 
     def end(self) -> float:
         return self.start + self.dur

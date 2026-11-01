@@ -62,14 +62,38 @@ def _active_level(buffer: List[float]) -> float:
     return math.sqrt(total / count)
 
 
+#: What a channel is *for*, most important first. A channel's role decides the
+#: level the balance gives it, and counting notes gets that wrong: the tune shares
+#: its channel with a busier counter line whenever the tune rests, so a pure count
+#: calls the melody channel "counter" and turns the song down by 13 dB under its
+#: own drums — which is exactly how a mix turns into a mess of notes.
+ROLE_ORDER = ("melody", "bass", "drum", "counter", "rhythm", "harmony")
+
+#: A role has to own this share of a channel's notes to name it. The tune taking
+#: a quarter of the notes on a channel is the tune's channel, not a guest.
+ROLE_SHARE = 4
+
+
 def channel_roles(grouped: Dict[str, Iterable]) -> Dict[str, str]:
-    """The role a channel mainly plays, for the balance."""
+    """The role a channel plays, by musical importance rather than by head-count.
+
+    The most important role that has a real share of the channel wins; a channel
+    where no role reaches that share falls back to the one with the most notes.
+    Calling the melody's channel "counter" is what buried the tune before.
+    """
     roles: Dict[str, str] = {}
     for channel, notes in grouped.items():
         counts: Dict[str, int] = {}
         for note in notes:
             counts[note.role] = counts.get(note.role, 0) + 1
-        if counts:
+        if not counts:
+            continue
+        total = sum(counts.values())
+        for role in ROLE_ORDER:
+            if counts.get(role, 0) * ROLE_SHARE >= total:
+                roles[channel] = role
+                break
+        else:
             roles[channel] = max(counts, key=counts.get)
     return roles
 
@@ -100,8 +124,12 @@ def balance(stems: Dict[str, List[float]],
 
     # the lead is whichever voice sits highest in the role table: it is the thing
     # to follow, so its own level is the reference every other voice is placed
-    # against
-    lead = max(measured, key=lambda channel: (wanted[channel], -measured[channel]))
+    # against. A drum channel only leads when the song has nothing else — drums
+    # are a pulse, not a tune, and making them the reference pushes the melody
+    # 10 dB down to fit under them.
+    melodic = [channel for channel in measured if roles.get(channel) != "drum"] \
+        or list(measured)
+    lead = max(melodic, key=lambda channel: (wanted[channel], -measured[channel]))
     for channel, level in measured.items():
         correction = ((wanted[channel] - wanted[lead])
                       - (level - measured[lead]))

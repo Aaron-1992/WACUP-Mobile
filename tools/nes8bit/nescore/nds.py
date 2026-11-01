@@ -439,6 +439,10 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
     for number, offset in starts:
         state = _TrackState(number=number)
         position = offset
+        # the last note *this* track played — a tie extends that one, and taking
+        # the song's last note instead stretched a note on a completely different
+        # track every time a song tied a note near the top of a track
+        last_note: Optional[Note] = None
         tick = 0
         loop_back = -1
         calls: List[int] = []
@@ -455,12 +459,13 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
                 pitch = command + state.transpose
                 wait = max(1, duration)
                 if 0 <= pitch <= 127 and velocity > 0:
-                    notes.append(Note(
+                    last_note = Note(
                         start=tick, dur=wait, pitch=pitch,
                         velocity=_scaled_velocity(velocity, state, global_volume),
                         part=number, program=state.program,
                         vibrato=(state.vibrato / 127.0) * 0.35,
-                        track_name="Track %02d" % number))
+                        track_name="Track %02d" % number, bank_pitch=pitch)
+                    notes.append(last_note)
                 tick += wait
                 position = after
                 continue
@@ -495,8 +500,8 @@ def read_sequence(data: bytes, max_seconds: float = 420.0) -> Song:
                 tempo_at[tick] = tempo
             elif command == 0xC8:                   # tie: extend the last note
                 duration, after = _vlq(body, position + 1)
-                if notes:
-                    notes[-1].dur += max(1, duration)
+                if last_note is not None:
+                    last_note.dur += max(1, duration)
                 tick += max(1, duration)
                 position = after
                 continue
@@ -966,12 +971,13 @@ def mark_percussion(song: Song, kits: Dict[int, List[int]]) -> int:
         if not keys or note.pitch not in keys:
             continue
         note.role = "drum"
-        # a kit laid out somewhere other than GM's range still has to land on the
-        # pieces the converter knows, so map it by key order
+        # A kit laid out somewhere other than GM's range still has to land on the
+        # pieces the converter knows, so the piece is named by key order. The key
+        # stays as the game wrote it: it is the one the bank's own kit answers to,
+        # and it is what a sampled playback resamples from.
         in_range = sum(1 for key in keys if 35 <= key <= 81)
-        if in_range * 2 < len(keys):
-            rank = keys.index(note.pitch)
-            note.pitch = _GM_PIECES[rank % len(_GM_PIECES)]
+        note.drum_piece = (note.pitch if in_range * 2 >= len(keys)
+                           else _GM_PIECES[keys.index(note.pitch) % len(_GM_PIECES)])
         marked += 1
     return marked
 

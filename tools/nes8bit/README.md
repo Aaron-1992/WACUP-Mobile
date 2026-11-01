@@ -30,7 +30,11 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
   notes; they are given the shortest length the chip can actually articulate
   instead of being thrown away as "too short";
 * **a mix, not a pile** — the melody sits on top, the bass under it, the chord bed
-  under both, and no more than a handful of duplicate lines play at once;
+  under both, and no more than a handful of duplicate lines play at once. The
+  balancer decides what a voice *is* by musical importance, not by counting notes:
+  when the tune shares its channel with a busier line (it does whenever it rests),
+  counting used to call that channel "counter" and turn the song down 13 dB under
+  its own drums;
 * **and the other answer, for a DS ROM** — `--samples` (or the samples row under the
   chips) stops converting and simply plays the archive's own instruments at once:
   the soundtrack as the game plays it, named `[ds]` and labelled *no chip*, so you can
@@ -388,6 +392,14 @@ it, and it would be dishonest to name it as a conversion.
 
 ![the samples row on: no chip, and the columns are the archive's own tracks](docs/window-samples.png)
 
+**A track plays one note at a time.** On the DS each sequence track owns one
+channel, so a new note stops the one before it. Rendering every note's release on
+top of the next note is what made a fast tune sound like a mess of notes: twenty
+sixteenths a second with a half-second release each is twenty pitches sounding at
+once. The renderer now stops a note where the next note on *its own track* begins
+(an 8 ms fade, so it is a stop rather than a click), and the diagnosis says how
+many notes sound at once — never more than the number of tracks.
+
 Measured, on a test bank whose one instrument is a seamless looped sine: a note at
 its recorded pitch comes out at exactly the sample's own frequency (500.0 Hz for a
 500 Hz tone), an octave up comes out at exactly twice it (1000.0 Hz), the note holds
@@ -403,6 +415,33 @@ sample behind them, so those notes are played as the square they are. The chips 
 drawn as out of use while this mode is on and their rows take no clicks, because a
 conversion and the original cannot both be the answer; switch the samples off and
 the chips you had chosen come back exactly as they were.
+
+### What was actually wrong with "it sounds like a mess of notes"
+
+Three defects, all measured on a real 153-second game theme (3 806 notes, 11 parts):
+
+1. **The tune's voice was turned down 13 dB.** The balance gave each channel a role
+   by counting notes. The channel the tune lives on also carries a counter line
+   that plays whenever the tune rests, and it had more notes (296 counter against
+   220 melody), so the balancer called the tune "counter" and pulled the melody's
+   channel down to 0.21 while the drums stayed at 1.0. It now takes the most
+   important role with a real share of the channel, and a drum channel can never be
+   the reference the rest is balanced against. On that theme the tune's channel
+   gained **13.5 dB of its own level, and 10 dB relative to the drums**; the
+   finished mix measures the melody at −10.1 dB with everything else at −14.7 dB.
+2. **Every release rang into the next note.** Fixed by the per-track stop above.
+3. **A drum kit keyed the game's own way was played as a melody.** The loader
+   renamed a kit's keys onto General MIDI keys so the chip could tell a kick from a
+   snare — and that rewrite landed on the note itself, so a kit keyed 60..71 played
+   its hits three octaves up, and a per-key instrument mistaken for a kit had its
+   melody re-pitched too. The piece is now a separate field (`drum_piece`) that only
+   the chip arrangement reads; the key the game wrote is never moved.
+   A tie (0xC8) had the same shape of bug: it lengthened the *song's* last note
+   instead of the last note of its own track.
+
+The command line reports the evidence rather than a verdict: `--diagnose` prints
+the melody's level against the rest, and for `--samples` how many notes sound at
+once.
 
 ## What "understanding the MIDI" means here
 

@@ -1437,6 +1437,62 @@ def recognition_test() -> None:
           nds.mark_timbres(nds.read_sequence(rom_tools.build_sseq()), sound_archive,
                            0) == 0)
 
+    print("a track plays one note at a time")
+    # a DS sequence track is monophonic: the next note takes the channel. Rendering
+    # every release tail on top of the next note is what turned a fast tune into a
+    # wash of pitches.
+    dense = rom_tools.build_tone_rom(os.path.join(work, "dense.nds"), release=0,
+                                     length=8,
+                                     after=tuple((60 + index % 5, 8)
+                                                 for index in range(20)))
+    dense_archive, _title = nds.open_archive(dense)
+    dense_song = nds.read_sequence(dense_archive.find_sequence("TONE").sseq)
+    one_line = sampled.render_song(dense_song, dense_archive, 0,
+                                   sampled.SampleOptions(rate=32768, stereo=False))
+    check("20 fast notes on one track sound one at a time",
+          one_line.peak_voices == 1,
+          "%d notes sounding at once" % one_line.peak_voices)
+    spread = Song(notes=[note.copy() for note in dense_song.notes],
+                  tempo=dense_song.tempo)
+    for index, note in enumerate(spread.notes):
+        note.part = index
+    many_lines = sampled.render_song(spread, dense_archive, 0,
+                                     sampled.SampleOptions(rate=32768,
+                                                           stereo=False))
+    check("and the same notes on their own tracks do overlap",
+          many_lines.peak_voices > 1,
+          "%d notes sounding at once" % many_lines.peak_voices)
+
+    # a tie belongs to the track that wrote it
+    tied = nds.read_sequence(rom_tools.build_tie_sseq())
+    first = [note for note in tied.notes if note.part == 0]
+    second = [note for note in tied.notes if note.part == 1]
+    check("a tie lengthens the note on its own track",
+          len(second) == 1 and second[0].dur > 0.8,
+          str([(round(n.dur, 2), n.part) for n in tied.notes]))
+    check("and leaves the other track's note alone",
+          len(first) == 1 and first[0].dur < 0.3,
+          str([(round(n.dur, 2), n.part) for n in tied.notes]))
+
+    # a drum kit keyed the game's own way: the piece is named, the key is not moved
+    own_key = rom_tools.build_own_key_kit_rom(os.path.join(work, "own-key.nds"))
+    own_song, own_archive, _entry, own_bank = nds.load(own_key, "BGM_KIT")
+    drums = [note for note in own_song.notes if note.role == "drum"]
+    check("a kit the game keyed its own way is still recognised as drums",
+          len(drums) >= 12, "%d of %d notes" % (len(drums), len(own_song.notes)))
+    check("and its hits keep the key the bank answers to",
+          all(note.pitch == note.bank_pitch for note in own_song.notes),
+          str([(n.pitch, n.bank_pitch) for n in own_song.notes if n.role == "drum"][:6]))
+    check("while the chip is told which piece each hit is",
+          all(0 <= note.drum_piece <= 127 for note in drums) and
+          len({note.drum_piece for note in drums}) > 1,
+          str(sorted({n.drum_piece for n in drums}))[:120])
+    own_render = sampled.render_song(own_song, own_archive, own_bank,
+                                     sampled.SampleOptions(rate=32768, stereo=False))
+    check("and the sampled render keeps every hit on its own track",
+          own_render.peak_voices <= 2,
+          "%d sounding at once" % own_render.peak_voices)
+
     print("playing the game's own instruments")
     tone_rom = rom_tools.build_tone_rom(os.path.join(work, "tone.nds"),
                                        root=60, pitch=60, rate=16000)
@@ -1493,6 +1549,9 @@ def recognition_test() -> None:
           os.path.isfile(os.path.join(work, "sampled-out", "tone [ds].wav")),
           str(sorted(os.listdir(os.path.join(work, "sampled-out"))
                      if os.path.isdir(os.path.join(work, "sampled-out")) else [])))
+    check("the render is long enough for the last note to release",
+          tone.seconds >= max(n.end() for n in tone_song.notes) + 0.5,
+          "%.2f s of audio" % tone.seconds)
     check("and it says plainly that no chip was involved",
           "no chip is involved" in said, said[-300:])
     printed = io.StringIO()
@@ -1573,6 +1632,29 @@ def recognition_test() -> None:
                                     "drum": mix_module.ROLE_TARGET["drum"]})
     check("the melody is well above the counter line and the drums",
           levels["gap"] > 3.0, str(levels))
+
+    # The tune shares its channel with a busier line whenever it rests, and the
+    # balance used to name that channel after whichever role had more notes — so
+    # the melody's own voice was turned down 13 dB to fit under the drums, which
+    # is what "a mess of notes" sounds like from the inside.
+    class _Fake:
+        def __init__(self, role):
+            self.role = role
+
+    shared = {"pulse1": [_Fake("counter")] * 296 + [_Fake("melody")] * 220,
+              "pulse2": [_Fake("counter")] * 808,
+              "noise": [_Fake("drum")] * 776}
+    roles = mix_module.channel_roles(shared)
+    check("a channel the tune plays on is the melody's channel",
+          roles["pulse1"] == "melody", str(roles))
+    check("a channel with only its own line keeps that line's role",
+          roles["pulse2"] == "counter" and roles["noise"] == "drum", str(roles))
+
+    stems = {"pulse1": [0.12] * 64, "pulse2": [0.12] * 64, "noise": [0.12] * 64}
+    balance = mix_module.balance(stems, roles)
+    check("and the balance does not bury it under the drums",
+          balance["pulse1"] > balance["noise"] * 0.9,
+          str({k: round(v, 2) for k, v in balance.items()}))
 
     # the whole path, on a busy tune: the melody has to survive arrangement
     busy = _crowded_midi(os.path.join(work, "busy.mid"))

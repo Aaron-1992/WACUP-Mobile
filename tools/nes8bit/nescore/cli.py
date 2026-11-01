@@ -310,6 +310,11 @@ def _convert_samples(source: str, song, analysis, args, multiple: bool) -> int:
                  rendered.notes_played, "" if rendered.notes_played == 1 else "s"))
         print("  %d instrument(s), %d drum kit(s) in this bank; %d track(s)"
               % (rendered.instruments, rendered.drums, rendered.voices))
+        print("  at most %d note(s) sound at once — a DS track plays one at a time"
+              % rendered.peak_voices)
+        if rendered.held_over:
+            print("  %d note(s) were stopped where the next note on their track "
+                  "began, as the game's own player does" % rendered.held_over)
         if rendered.synthetic:
             print("  ! %d note(s) are the bank's square-wave instruments, which "
                   "have no sample to play" % rendered.synthetic)

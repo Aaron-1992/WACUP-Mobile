@@ -186,7 +186,34 @@ def build_kit_sbnk(keys=range(36, 48)) -> bytes:
     return bytes(data)
 
 
-def build_drum_sseq() -> bytes:
+def build_tones_swar(frequencies, rate: int = 16000) -> bytes:
+    """One looped two-period sine per frequency — a kit whose pieces are tellable
+    apart by ear and, more usefully here, by a pitch measurement."""
+    waves = []
+    for frequency in frequencies:
+        # a wave is stored in 4-byte words, so the period has to round to one
+        samples = max(4, int(round(rate / float(frequency) * 2.0 / 4.0)) * 4)
+        pcm = bytes(int(round(127 + 100 * math.sin(2 * math.pi * index / (samples / 2.0))))
+                    for index in range(samples))
+        waves.append(_swav(pcm, 0, rate, looped=True, loop_start=0,
+                           samples=len(pcm)))
+    header = 0x3C + len(waves) * 4
+    offsets = []
+    position = header
+    for wave in waves:
+        offsets.append(position)
+        position += len(wave)
+    data = bytearray()
+    data += _std_header(b"SWAR", position)
+    data += b"DATA" + struct.pack("<I", position - 0x10) + b"\x00" * 32
+    data += struct.pack("<I", len(waves))
+    for offset in offsets:
+        data += struct.pack("<I", offset)
+    data += b"".join(waves)
+    return bytes(data)
+
+
+def build_drum_sseq(keys=(36, 42, 38, 42)) -> bytes:
     """One melody track and one drum track that uses instrument 9's kit."""
     header_size = 0x1C
     tempo = bytearray([0xFE, 0x07, 0x00]) + bytes([0xE1]) + \
@@ -196,7 +223,7 @@ def build_drum_sseq() -> bytes:
         melody += bytes([pitch, 100]) + _vlq(48)
     melody += bytes([0x94, 0x00, 0x00, 0x00, 0xFF])
     drums = bytearray([0x81, 9])
-    for pitch in (36, 42, 38, 42) * 6:
+    for pitch in tuple(keys) * 6:
         drums += bytes([pitch, 100]) + _vlq(24)
     drums += bytes([0xFF])
     tempo_offset = 3 * 5
@@ -215,6 +242,21 @@ def build_drum_sseq() -> bytes:
     return bytes(data)
 
 
+def build_own_key_kit_rom(path: str, keys=range(60, 72)) -> str:
+    """A ROM whose kit is keyed the game's own way, nowhere near GM's 35..81.
+
+    A drum kit laid out on keys 60..71 is what several DS games do, and it is the
+    case where "map the kit onto GM so the chip knows the pieces" and "play the
+    kit the way the bank stores it" are two different keys for the same hit.
+    """
+    keys = list(keys)
+    frequencies = [440.0 * 2 ** (index / 12.0) for index in range(len(keys))]
+    sdat = build_sdat(sequences=[("BGM_KIT", build_drum_sseq(tuple(keys))[:])],
+                      sbnk=build_kit_sbnk(keys=keys),
+                      swar=build_tones_swar(frequencies))
+    return build_rom(path, sdat)
+
+
 def write_kit_rom(path: str) -> str:
     """A ROM whose soundtrack has one song playing a real drum kit."""
     sdat = build_sdat(sequences=[("BGM_KIT", build_drum_sseq())],
@@ -222,9 +264,9 @@ def write_kit_rom(path: str) -> str:
     return build_rom(path, sdat)
 
 
-def build_tone_sbnk(root: int = 60) -> bytes:
+def build_tone_sbnk(root: int = 60, release: int = 100) -> bytes:
     """One instrument: a single wave, played over the whole keyboard."""
-    direct = _note_definition(0, 0, root)
+    direct = _note_definition(0, 0, root, release=release)
     header = 0x3C + 128 * 4
     offset = header
     blob = direct
@@ -240,13 +282,22 @@ def build_tone_sbnk(root: int = 60) -> bytes:
     return bytes(data)
 
 
-def build_tone_sseq(pitch: int = 60, length: int = 384) -> bytes:
-    """One track, one long note on instrument 0 — a note you can measure."""
+def build_tone_sseq(pitch: int = 60, length: int = 384, gap: int = 0,
+                    after=()) -> bytes:
+    """One track, one long note on instrument 0 — a note you can measure.
+
+    ``after`` adds further notes as (pitch, length) pairs on the same track, which
+    is how the checks play two notes in a row and see where the first one stops.
+    """
     header_size = 0x1C
     melody = bytearray()
     melody += bytes([0x81, 0])                    # instrument 0
     melody += bytes([0xC1, 127])                  # full track volume
     melody += bytes([pitch, 110]) + build_tone_vlq(length)
+    if gap:
+        melody += bytes([0x80]) + build_tone_vlq(gap)
+    for extra_pitch, extra_length in after:
+        melody += bytes([extra_pitch, 110]) + build_tone_vlq(extra_length)
     melody += bytes([0xFF])
 
     definitions = bytearray()
@@ -263,12 +314,44 @@ def build_tone_sseq(pitch: int = 60, length: int = 384) -> bytes:
     return bytes(data)
 
 
+def build_tie_sseq() -> bytes:
+    """Two tracks: the first plays one short note, the second ties a long one.
+
+    A tie (0xC8) extends the note before it *on its own track*. Extending the
+    song's last note instead stretches a note on a different track, which is a
+    wrong length for no reason a listener can hear as anything but a mistake.
+    """
+    header_size = 0x1C
+    first = bytearray([0x81, 0, 0xC1, 127])
+    first += bytes([60, 100]) + _vlq(24)
+    first += bytes([0xFF])
+    second = bytearray([0x81, 0, 0xC1, 127])
+    second += bytes([72, 100]) + _vlq(24)
+    second += bytes([0xC8]) + _vlq(72)
+    second += bytes([0xFF])
+
+    tempo = bytearray([0xFE, 0x01, 0x00])
+    offsets = 2 * 5
+    definitions = bytearray()
+    for number, offset in ((0, offsets + len(tempo)),
+                           (1, offsets + len(tempo) + len(first))):
+        definitions += bytes([0x93, number, offset & 0xFF, (offset >> 8) & 0xFF,
+                              (offset >> 16) & 0xFF])
+    body = bytes(definitions) + bytes(tempo) + bytes(first) + bytes(second)
+    total = header_size + len(body)
+    data = bytearray(_std_header(b"SSEQ", total))
+    data += b"DATA" + struct.pack("<II", total - 0x10, header_size)
+    data += body
+    return bytes(data)
+
+
 def build_tone_vlq(value: int) -> bytes:
     return _vlq(value)
 
 
-def build_tone_rom(path: str, root: int = 60,
-                   pitch: int = 60, rate: int = 16000) -> str:
+def build_tone_rom(path: str, root: int = 60, pitch: int = 60,
+                   rate: int = 16000, release: int = 100, after=(),
+                   length: int = 384, gap: int = 0) -> str:
     """A ROM whose one instrument is a seamless looped sine at a known pitch.
 
     The tone is two full periods in 64 samples, looped from 0 to 64, so a
@@ -287,8 +370,10 @@ def build_tone_rom(path: str, root: int = 60,
     swar += struct.pack("<I", 1)
     swar += struct.pack("<I", header)
     swar += wave8
-    sdat = build_sdat(sequences=[("TONE", build_tone_sseq(pitch))],
-                      sbnk=build_tone_sbnk(root), swar=bytes(swar))
+    sdat = build_sdat(sequences=[("TONE", build_tone_sseq(pitch, length, gap,
+                                                          after=after))],
+                      sbnk=build_tone_sbnk(root, release=release),
+                      swar=bytes(swar))
     return build_rom(path, sdat)
 
 

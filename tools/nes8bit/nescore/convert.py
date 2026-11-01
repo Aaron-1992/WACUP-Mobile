@@ -367,6 +367,10 @@ def _sample_advice(rendered, song) -> List[str]:
     if rendered.synthetic:
         lines.append("%d note(s) use the bank's square-wave instruments, which "
                      "have no sample to play" % rendered.synthetic)
+    if rendered.peak_voices > max(1, rendered.voices):
+        lines.append("%d note(s) sound at once on %d track(s) — the archive is "
+                     "playing more than the game's player would"
+                     % (rendered.peak_voices, rendered.voices))
     if getattr(song, "ds_song_count", 0) and song.ds_song_count > 1:
         lines.append("song '%s' of %d in this archive" % (song.ds_song,
                                                          song.ds_song_count))
