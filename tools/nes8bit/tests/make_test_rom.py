@@ -345,6 +345,104 @@ def build_tie_sseq() -> bytes:
     return bytes(data)
 
 
+def build_multi_track_rom(path: str, tempo: int = 200, bars: int = 8) -> str:
+    """A ROM laid out the way a real soundtrack is: several monophonic tracks.
+
+    One melody, one bass, two chord lines, one kit — every track monophonic, each
+    with its own instrument slot, at a fast game tempo with sixteenth notes. This
+    is the shape that used to fall apart: tracks that get split into several
+    voices, notes that pile up, and songs that lose half their parts.
+    """
+    sixteenth = 12                                  # ticks; 48 per quarter
+    step_seconds = 60.0 / tempo / 4.0
+    melody = [(72 + [0, 2, 4, 7, 4, 2, 0, -3][index % 8], 100, sixteenth)
+              for index in range(bars * 16)]
+    bass = [(36 + (bar % 4), 110, sixteenth * 8) for bar in range(bars)
+            for _half in (0, 1)]
+    chords = []
+    for voice, offset in enumerate((0, 4)):
+        chords.append([(64 + offset + (bar % 3), 70, sixteenth * 4)
+                       for bar in range(bars) for _step in range(4)])
+    drums = []
+    for bar in range(bars):
+        drums.append((36, 110, sixteenth))
+        drums.append((38, 100, sixteenth))
+        for _step in range(0, 16, 2):
+            drums.append((42, 70, sixteenth))
+
+    tracks = [(0, melody), (1, bass), (2, chords[0]), (2, chords[1]), (9, drums)]
+    header_size = 0x1C
+    tempo_block = bytearray([0xFE, 0x07, 0x00, 0xE1]) + struct.pack("<H", tempo) + \
+        bytes([0xFF])
+    blobs = []
+    for program, notes in tracks:
+        blob = bytearray([0x81, program, 0xC1, 120])
+        for pitch, velocity, length in notes:
+            blob += bytes([pitch, velocity]) + _vlq(length)
+        blob += bytes([0xFF])
+        blobs.append(bytes(blob))
+    table = 5 * len(blobs)
+    offsets, position = [], table + len(tempo_block)
+    for blob in blobs:
+        offsets.append(position)
+        position += len(blob)
+    definitions = bytearray()
+    for number, offset in enumerate(offsets):
+        definitions += bytes([0x93, number, offset & 0xFF, (offset >> 8) & 0xFF,
+                              (offset >> 16) & 0xFF])
+    body = bytes(definitions) + bytes(tempo_block) + b"".join(blobs)
+    total = header_size + len(body)
+    sequence = bytearray(_std_header(b"SSEQ", total))
+    sequence += b"DATA" + struct.pack("<II", total - 0x10, header_size)
+    sequence += body
+
+    # eight tones plus a kit: every slot is a sample the bank really holds
+    waves = []
+    for index in range(8):
+        frequency = 220.0 * 2 ** (index / 12.0)
+        samples = max(4, int(round(16000 / frequency * 2 / 4)) * 4)
+        pcm = bytes(int(round(127 + 100 * math.sin(2 * math.pi * position / (samples / 2.0))))
+                    for position in range(samples))
+        waves.append(_swav(pcm, 0, 16000, looped=True, loop_start=0,
+                           samples=len(pcm)))
+    wave_header = 0x3C + len(waves) * 4
+    wave_offsets, position = [], wave_header
+    for wave in waves:
+        wave_offsets.append(position)
+        position += len(wave)
+    swar = bytearray(_std_header(b"SWAR", position))
+    swar += b"DATA" + struct.pack("<I", position - 0x10) + b"\x00" * 32
+    swar += struct.pack("<I", len(waves))
+    for offset in wave_offsets:
+        swar += struct.pack("<I", offset)
+    swar += b"".join(waves)
+
+    kit = bytes([36, 47]) + b"".join(_typed_definition(index % 8, 0, 60)
+                                     for index in range(12))
+    blobs = [_note_definition(index, 0, 60) for index in range(8)] + [kit]
+    bank_header = 0x3C + 128 * 4
+    bank_offsets, position = [], bank_header
+    for blob in blobs:
+        bank_offsets.append(position)
+        position += len(blob)
+    sbnk = bytearray(_std_header(b"SBNK", position))
+    sbnk += b"DATA" + struct.pack("<I", position - 0x10) + b"\x00" * 32
+    sbnk += struct.pack("<I", 128)
+    for slot in range(128):
+        if slot < 8:
+            sbnk += struct.pack("<BHB", 1, bank_offsets[slot], 0)
+        elif slot == 9:
+            sbnk += struct.pack("<BHB", 16, bank_offsets[8], 0)
+        else:
+            sbnk += struct.pack("<BHB", 0, 0, 0)
+    sbnk += b"".join(blobs)
+
+    del step_seconds
+    sdat = build_sdat(sequences=[("BGM_BUSY", bytes(sequence))],
+                      sbnk=bytes(sbnk), swar=bytes(swar))
+    return build_rom(path, sdat)
+
+
 def build_tone_vlq(value: int) -> bytes:
     return _vlq(value)
 

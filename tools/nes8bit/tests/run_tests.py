@@ -1493,6 +1493,49 @@ def recognition_test() -> None:
           own_render.peak_voices <= 2,
           "%d sounding at once" % own_render.peak_voices)
 
+    print("a whole soundtrack, the way a real ROM lays it out")
+    # Several monophonic tracks at a fast game tempo: the shape that used to fall
+    # apart — tracks split into several voices, notes piling up, parts vanishing.
+    busy_rom = rom_tools.build_multi_track_rom(os.path.join(work, "busy-rom.nds"))
+    busy_song, busy_archive, _entry, busy_bank = nds.load(busy_rom, "BGM_BUSY")
+    per_track = {}
+    for note in busy_song.notes:
+        per_track[note.part] = per_track.get(note.part, 0) + 1
+    check("every track in the sequence is read, in full",
+          len(per_track) == 5 and sum(per_track.values()) == 288,
+          str(sorted(per_track.items())))
+    check("and nothing was dropped as an unknown command",
+          not [w for w in busy_song.warnings if "command" in w],
+          str(busy_song.warnings))
+    busy_analysis = analyze.analyse(busy_song)
+    check("each monophonic track is one voice, never split",
+          len(busy_analysis.voices) == 5,
+          "%d voices from 5 tracks" % len(busy_analysis.voices))
+    roles = sorted(voice.role for voice in busy_analysis.voices)
+    check("with the melody, the bass and the drums all found",
+          "melody" in roles and "bass" in roles and "drum" in roles, str(roles))
+    busy_render = sampled.render_song(busy_song, busy_archive, busy_bank,
+                                      sampled.SampleOptions(rate=32768,
+                                                            stereo=False))
+    check("the sampled render plays every note, one at a time per track",
+          busy_render.notes_played == 288 and
+          busy_render.peak_voices == 5 and busy_render.held_over == 0,
+          "%d played, %d at once, %d held over"
+          % (busy_render.notes_played, busy_render.peak_voices,
+             busy_render.held_over))
+    busy_result = convert.convert_file(
+        busy_rom, convert.Settings(sequence="BGM_BUSY"),
+        output_path=os.path.join(work, "busy-rom.wav"))
+    kept_melody = [note for note in busy_result.notes if note.role == "melody"]
+    kept_drums = [note for note in busy_result.notes if note.role == "drum"]
+    check("the chip conversion keeps the tune and the beat, not the chords",
+          len(kept_melody) >= 120 and len(kept_drums) >= 60,
+          "%d melody, %d drum of %d placed"
+          % (len(kept_melody), len(kept_drums), len(busy_result.notes)))
+    check("and says how many voices the song would need",
+          any("voice" in line or "part" in line for line in busy_result.advice),
+          str(busy_result.advice)[:200])
+
     print("playing the game's own instruments")
     tone_rom = rom_tools.build_tone_rom(os.path.join(work, "tone.nds"),
                                        root=60, pitch=60, rate=16000)
