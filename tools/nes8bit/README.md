@@ -11,9 +11,14 @@ Takes **MIDI files** (and **game music logs**: VGM, VGZ, GYM, **Nintendo DS ROMs
 * **it reads the MIDI before it converts it** — tracks are split into monophonic
   voices by voice leading, instruments and drum pieces are identified, tempo, meter
   and key are read, and the result is shown in the window;
-* **sampled drums** — kick, snare, hats, toms and cymbals are real samples played
-  through the console's delta channel, not noise bursts pretending to be drums,
-  and the kit is levelled like a kit instead of like eight separate files;
+* **sampled drums, from the game itself** — a DS ROM's bank *holds* the kit the
+  game plays (a kick, a snare, hats, toms, cymbals, one sample per key), and a
+  conversion uses those samples: the drums of the game the music came from, not a
+  generic kit. Each piece is recognised by its *sound*, because key 60 says nothing
+  unless the game happened to use General MIDI keys. A MIDI file gets the built-in
+  kit, which performs every piece several times so a fast part is not the same
+  click repeated. The drums row in the window, `--no-drums` or `--builtin-drums`
+  change that;
 * **no click-and-fizz** — every note has an attack and a release, and the mix is
   gently filtered, so it sounds like music rather than a test tone;
 * **every hardware voice is used, and whole consoles can be switched on** — a
@@ -354,9 +359,33 @@ turn into a bass riff, which is the single worst thing that can happen to a
 conversion). The reader now looks for the kit itself: the instrument type with one
 voice per key, a *different* wave on every key, and a plain PSG-noise instrument.
 Those notes are marked as drums, so they land on the noise channel as kick, snare
-and hat. If a game's kit is laid out somewhere other than the General MIDI range, its
-keys are mapped by key order onto the usual pieces (bass drum at the bottom, then
-snare, hats, toms, cymbals) and the conversion says how many drum notes it found.
+and hat — or, better, on the delta channel playing **the bank's own drum samples**.
+
+![the drums row after a conversion: SAMPLED DRUMS ON·GAME](docs/window-drums.png)
+
+**Which piece is which is measured, not guessed.** A kit keyed 60..65 is not less
+real than one keyed 35..40, and reading the key numbers called a kick a "bongo". So
+every sample in the kit is measured when the bank is read: a dark tonal boom is a
+kick, a noisy mid hit is a snare, a very short bright tss is a hat, a ring is a
+crash. On a test kit keyed 60..65 with real drum shapes, all six read correctly, and
+the hit for key 60 plays the kick at any pitch the game wrote. The conversion says
+which kit it used on screen (`SAMPLED DRUMS ON·GAME`) and in `--diagnose`.
+
+**Three ways to get drums**, one row each in the window:
+
+| | drums are | when |
+| --- | --- | --- |
+| `D SAMPLED DRUMS ON·GAME` | the file's own kit | the default, on a DS ROM |
+| `D SAMPLED DRUMS ON·SYNTH` | the built-in kit (`--builtin-drums`) | MIDI files, or a bank with no kit |
+| `D SAMPLED DRUMS OFF` | the noise channel (`--no-drums`) | thinnest, and uses no sample memory |
+
+The built-in kit's pieces are performed three times each (different tuning, decay
+and noise), and which take a hit gets comes from its position in the song, so a
+render is still byte-for-byte repeatable but a roll is no longer one click
+repeated. Measured: the same note with the game's kit, the built-in kit and the
+noise channel gives three clearly different spectra (3 430 Hz, 4 301 Hz and
+4 940 Hz weighted centroid on the drum voice), which is what "it always sounds the
+same" was about.
 
 What carries across exactly: notes, timing, tempo, per-track volume, transpose,
 program changes, key ranges, root keys, pans, sample rates, loop points, and the

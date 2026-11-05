@@ -96,6 +96,17 @@ def _font_mono(size: int, bold: bool = False):
                     "Courier New", "Courier"), bold=bold), size)
 
 
+def _kit_hint(source: str) -> str:
+    """"GAME" or "SYNTH" in four characters, for the drums row."""
+    if not source:
+        return ""
+    if "game's own kit" in source:
+        return "GAME"
+    if "noise channel" in source:
+        return "NOISE"
+    return "SYNTH"
+
+
 def _channel_short(channel: str) -> str:
     if channel in _CHANNEL_NAMES:
         return _CHANNEL_NAMES[channel]
@@ -207,6 +218,7 @@ class App:
 
         self.items: List[QueueItem] = []
         self.results: List[convert.Result] = []
+        self.drum_hint = ""          # which kit the last conversion used
         self.batch: List[QueueItem] = []
         self.output_dir = dialogs.default_output_dir()
         self.convert_started = 0.0
@@ -704,6 +716,7 @@ class App:
                         item.status = "failed"
                         item.error = result.error
                 self.results.insert(0, result)
+                self.drum_hint = _kit_hint(result.drum_source)
                 self.selected_result = 0
                 if not result.ok:
                     for position, other in enumerate(self.results):
@@ -1092,8 +1105,25 @@ class App:
         self._save_settings()
 
     def toggle_drums(self) -> None:
+        """Sampled drum hits on or off.
+
+        On: the file's own kit when it has one, the built-in kit otherwise. Off:
+        the noise channel plays the hits, which is thinner but unmistakably a chip
+        and costs no sample memory.
+        """
         self.settings.sampled_drums = not self.settings.sampled_drums
         self._save_settings()
+        if self.settings.sampled_drums:
+            self.status = ("Sampled drums on: the game's own kit when the file has "
+                           "one, the built-in kit otherwise")
+        else:
+            self.status = "Sampled drums off: the drums are played on the noise channel"
+        self.status_error = False
+        self._dirty = True
+
+    def _sample_mode_note(self) -> bool:
+        """True when the GAME'S OWN SAMPLES mode is on: it plays its own drums."""
+        return bool(self.settings.samples)
 
     def chip_count(self) -> int:
         """How many chips are on, counting the NES APU when it is one of them."""
@@ -2030,7 +2060,7 @@ class App:
         rows_needed = 3 + (len(entries) - 3 + 1) // 2
         row_h = 24
         samples_on = bool(self.settings.samples)
-        chips_h = (rows_needed + 1) * row_h + 36
+        chips_h = (rows_needed + 2) * row_h + 36
         chips_box = pygame.Rect(rect.x, rect.y, rect.width, chips_h)
         inner = theme.panel(self.screen, chips_box, t, "CHIPS", self.fonts["tiny"])
         self._tiny_buttons(chips_box, (("ALL", self.all_chips, 44),
@@ -2038,6 +2068,7 @@ class App:
         theme.field(self.screen, inner, t, t.field)
         self.chip_rects = []
         self.samples_rect = pygame.Rect(0, 0, 0, 0)
+        self.drum_rect = pygame.Rect(0, 0, 0, 0)
         col_w = inner.width // 2
         column, line = 0, 0
         for index, (name, label, count, wide) in enumerate(entries):
@@ -2098,6 +2129,34 @@ class App:
                    "small", t.accent if samples_on else t.field_text)
         self.samples_rect = sample_row.copy()
         self.hits.append((sample_row.copy(), self.toggle_samples))
+
+        # --- and what the drums are made of, which used to be an invisible setting
+        drum_row = pygame.Rect(inner.x, sample_row.bottom + 2,
+                               inner.width - 2, row_h - 2)
+        drums_on = bool(self.settings.sampled_drums)
+        if drum_row.collidepoint(self.mouse) and not self._sample_mode_note():
+            self.screen.fill(t.playing, drum_row)
+        dim = self._sample_mode_note()          # the mode below plays its own drums
+        self._text(drum_row.x + 4, drum_row.y + (row_h - 16) // 2, "D ",
+                   "head", t.pattern_empty if dim else
+                   (t.accent if drums_on else t.pattern_vol))
+        drum_tag_text = "ON" if drums_on else "OFF"
+        if drums_on and not dim and self.drum_hint:
+            drum_tag_text += "·" + self.drum_hint
+        drums_tag = self.fonts["tiny"].render(
+            drum_tag_text, t.smooth,
+            t.pattern_empty if dim else (t.ok if drums_on else t.pattern_empty))
+        self.screen.blit(drums_tag, (drum_row.right - drums_tag.get_width() - 4,
+                                     drum_row.y + (row_h - 16) // 2))
+        room = drum_row.right - drums_tag.get_width() - 8 - (drum_row.x + 32)
+        self._text(drum_row.x + 32,
+                   drum_row.y + (row_h - self.fonts["small"].get_height()) // 2,
+                   _fit(self.fonts["small"], "SAMPLED DRUMS" if not dim
+                        else "DRUMS FROM THE FILE", room),
+                   "small", t.pattern_empty if dim else t.field_text)
+        self.drum_rect = drum_row.copy()
+        if not dim:
+            self.hits.append((drum_row.copy(), self.toggle_drums))
 
         # --- queue: one row per file with its own status, so a batch is visible
         rest = rect.bottom - chips_box.bottom - 6
@@ -2950,6 +3009,17 @@ def selftest(screenshot: Optional[str] = None) -> int:
             check("the CHIPS panel has a samples row",
                   app.samples_rect.width > 0 and app.samples_rect.height > 0,
                   str(app.samples_rect))
+            check("and a row that turns the sampled drums off",
+                  app.drum_rect.width > 0, str(app.drum_rect))
+            drums_before = app.settings.sampled_drums
+            click(app.drum_rect)
+            check("the drums row switches them off",
+                  app.settings.sampled_drums != drums_before,
+                  str(app.settings.sampled_drums))
+            click(app.drum_rect)
+            check("and on again",
+                  app.settings.sampled_drums == drums_before,
+                  str(app.settings.sampled_drums))
             click(app.samples_rect)
             check("the samples row switches the samples on",
                   app.settings.samples, str(app.settings.samples))

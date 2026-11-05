@@ -1604,6 +1604,109 @@ def recognition_test() -> None:
           code == 1 or "Nintendo DS" in printed.getvalue(),
           printed.getvalue()[-200:])
 
+    print("a kit with more than one hit in it")
+    kit = samples_module.builtin()
+    check("the built-in kit has more than one piece",
+          len(kit.names()) >= 12, "%d pieces" % len(kit.names()))
+    takes = kit.pieces.get("snare") or []
+    check("a piece is performed several times, not recorded once",
+          len(takes) >= 2, "%d takes of the snare" % len(takes))
+    if len(takes) >= 2:
+        difference = sum(abs(a - b) for a, b in zip(takes[0], takes[1])) / \
+            max(1, len(takes[0]))
+        check("and the takes are actually different hits",
+              difference > 0.01, "mean difference %.3f" % difference)
+    check("a hit gets a take, not always the first one",
+          kit.get("snare", 0.0) is not kit.get("snare", 0.9),
+          "same buffer for both")
+
+    # --- the game's own kit, and the key numbers that say nothing about it
+    drum_rom = rom_tools.build_drum_kit_rom(os.path.join(work, "drum-kit.nds"))
+    drum_archive, _title = nds.open_archive(drum_rom)
+    game_kit = samples_module.from_bank(drum_archive, 0)
+    check("a DS bank's percussion is read out of its own samples",
+          game_kit is not None and len(game_kit.names()) >= 5,
+          game_kit.source if game_kit else "no kit")
+    pieces = set(game_kit.names()) if game_kit else set()
+    check("and a kick, a snare and a hat are recognised by their sound",
+          {"kick", "snare", "hat"} <= pieces, str(sorted(pieces)))
+    check("not by the key the game happened to use",
+          game_kit is not None and 60 in game_kit.key_map and
+          game_kit.key_map[60] == "kick",
+          str(game_kit.key_map) if game_kit else "")
+    check("the kit plays at the delta channel's rate",
+          game_kit is not None and game_kit.rate == samples_module.sample_rate(),
+          str(game_kit.rate) if game_kit else "")
+
+    game_result = convert.convert_file(
+        drum_rom, convert.Settings(sequence="BGM_KIT"),
+        output_path=os.path.join(work, "game-kit.wav"), keep_in_memory=True)
+    check("a conversion plays the file's own kit",
+          "game's own kit" in game_result.drum_source, game_result.drum_source)
+    used = {note.drum for note in game_result.notes if note.role == "drum"}
+    check("and every hit goes to the piece its sample measured as",
+          {"kick", "snare", "hat"} <= used, str(sorted(used)))
+    game_stem = game_result.stems.get("noise") or []
+
+    builtin_result = convert.convert_file(
+        drum_rom, convert.Settings(sequence="BGM_KIT", builtin_drums=True),
+        output_path=os.path.join(work, "builtin-kit.wav"), keep_in_memory=True)
+    check("switching the game's kit off says so",
+          "built-in kit" in builtin_result.drum_source,
+          builtin_result.drum_source)
+    check("and still names the pieces from the samples",
+          {"kick", "snare", "hat"} <= {n.drum for n in builtin_result.notes
+                                       if n.role == "drum"},
+          str(sorted({n.drum for n in builtin_result.notes if n.role == "drum"})))
+    builtin_stem = builtin_result.stems.get("noise") or []
+    check("so the two kinds of kit really do sound different",
+          bool(game_stem) and bool(builtin_stem) and
+          sum(abs(a - b) for a, b in zip(game_stem, builtin_stem)) /
+          max(1, len(game_stem)) > 0.01,
+          "mean difference %.4f" % (
+              sum(abs(a - b) for a, b in zip(game_stem, builtin_stem)) /
+              max(1, len(game_stem)) if game_stem and builtin_stem else 0.0))
+
+    noise_result = convert.convert_file(
+        drum_rom, convert.Settings(sequence="BGM_KIT", sampled_drums=False),
+        output_path=os.path.join(work, "noise-drums.wav"), keep_in_memory=True)
+    check("the switch turns the sampled hits off",
+          "noise channel" in noise_result.drum_source,
+          noise_result.drum_source)
+    check("and the drums are still played, just on the noise channel",
+          any(note.role == "drum" and note.channel == "noise"
+              for note in noise_result.notes),
+          str(noise_result.channels))
+    check("while no sample memory is used for them",
+          not noise_result.stems.get("dmc"),
+          str(sorted(noise_result.stems)))
+
+    # a MIDI file has no bank, so it gets the built-in kit and General MIDI names
+    midi_result = convert.convert_file(
+        _crowded_midi(os.path.join(work, "kit-midi.mid")), convert.Settings(),
+        output_path=os.path.join(work, "kit-midi.wav"))
+    check("a MIDI file falls back to the built-in kit",
+          "built-in kit" in midi_result.drum_source, midi_result.drum_source)
+    check("and keeps the General MIDI names its keys really mean",
+          {n.drum for n in midi_result.notes if n.role == "drum"} <=
+          set(samples_module.PIECES),
+          str(sorted({n.drum for n in midi_result.notes if n.role == "drum"})))
+
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        main([drum_rom, "--sequence", "BGM_KIT", "--no-drums", "--diagnose",
+              "-o", os.path.join(work, "cli-noise")])
+    said = printed.getvalue()
+    check("the command line can switch the sampled drums off too",
+          "noise channel" in said, said[-260:])
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        main([drum_rom, "--sequence", "BGM_KIT", "--builtin-drums", "--diagnose",
+              "-o", os.path.join(work, "cli-builtin")])
+    said = printed.getvalue()
+    check("and can ask for the built-in kit by name",
+          "built-in kit" in said, said[-260:])
+
     print("telling drums from music")
 
     def part(program, notes):

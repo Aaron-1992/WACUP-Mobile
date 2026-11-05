@@ -380,7 +380,13 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
         echo=bool(args.echo),
         limit=not args.no_limit,
         compress=not args.no_compress,
+        sampled_drums=not args.no_drums,
     )
+    # the drums: the game's own kit when the file brought one, and the noise
+    # channel instead of any samples when --no-drums says so
+    render_options.drum_kit, drum_source = convert.drum_kit(
+        source, notes, sampled_drums=not args.no_drums,
+        builtin_drums=bool(args.builtin_drums))
 
     grouped = {}
     for note in notes:
@@ -425,6 +431,7 @@ def _convert(source: str, args, extensions, channels, multiple: bool = False,
         for line in _diagnosis(song, analysis, notes, stats, grouped, stems,
                                duration):
             print(line)
+        print("  drums: %s" % drum_source)
     if args.stats or args.verbose:
         print("  what the file contains:")
         for line in analysis.summary_lines():
@@ -494,6 +501,9 @@ def main(argv=None) -> int:
                              "sounds like a wasp in a jar)")
     parser.add_argument("--no-drums", action="store_true",
                         help="use the noise channel instead of sampled drum hits")
+    parser.add_argument("--builtin-drums", action="store_true",
+                        help="ignore a game file's own drum kit and use the "
+                             "built-in one")
     parser.add_argument("--no-dedupe", action="store_true",
                         help="keep pairs of parts that double each other exactly")
     parser.add_argument("--no-quantize", action="store_true",

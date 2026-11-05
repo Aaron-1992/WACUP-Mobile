@@ -78,6 +78,7 @@ class RenderOptions:
     echo: bool = False          # off by default: it is a taste, not a default
     limit: bool = True          # tame the transients instead of the whole mix
     compress: bool = True       # gentle bus compression: even, not squashed
+    drum_kit: Optional[object] = None   # a samples.Kit; None means the built-in one
 
 
 def note_frequency(pitch: float) -> float:
@@ -308,11 +309,18 @@ def _hit_variation(note: Note) -> float:
     return seed / 0x7FFFFFFF
 
 
-def _emit_sample(buf, a: int, b: int, note: Note, rate: int, gain: float) -> None:
-    """Play a kit piece, resampled from the delta channel's rate."""
-    piece = samples.get(samples.for_drum(note.drum or "snare", note.pitch))
-    source_rate = samples.sample_rate()
+def _emit_sample(buf, a: int, b: int, note: Note, rate: int, gain: float,
+                 kit=None) -> None:
+    """Play a kit piece, resampled from the kit's own rate.
+
+    ``kit`` is a ``samples.Kit``: the game's own percussion when the file brought a
+    bank, the synthesised kit otherwise. The hit's position in the song picks which
+    take of the piece it gets, so a part stops being the same click repeated.
+    """
+    kit = kit or samples.builtin()
     variation = _hit_variation(note)
+    piece = kit.get(samples.for_drum(note.drum or "snare", note.pitch), variation)
+    source_rate = float(kit.rate)
     gain = gain * (0.94 + 0.12 * variation)
     step = (source_rate / float(rate)) * (1.0 + 0.025 * (variation - 0.5))
     length = min(b - a, int(len(piece) / step))
@@ -351,7 +359,8 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
             spec.kind in ("noise", "dmc") or spec.noise_capable)
 
         if percussion and options.sampled_drums:
-            _emit_sample(buf, a, b, note, rate, note_gain * 1.55)
+            _emit_sample(buf, a, b, note, rate, note_gain * 1.55,
+                         options.drum_kit)
             continue
 
         frequency = note_frequency(note.pitch + note.bend)
@@ -378,7 +387,7 @@ def render_channel(notes: List[Note], spec, options: RenderOptions,
             _emit_huc(buf, a, b, note, rate, note_gain, vibrato)
         elif spec.kind == "dmc":
             # a melodic note on the delta channel: play the hit's own pitch
-            _emit_sample(buf, a, b, note, rate, note_gain)
+            _emit_sample(buf, a, b, note, rate, note_gain, options.drum_kit)
     return buf
 
 

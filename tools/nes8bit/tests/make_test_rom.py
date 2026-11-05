@@ -242,6 +242,79 @@ def build_drum_sseq(keys=(36, 42, 38, 42)) -> bytes:
     return bytes(data)
 
 
+def _drum_shapes(rate: int = 32000):
+    """Five percussion samples that *are* drums, not sines: the shapes a bank holds."""
+    import random
+
+    def rng(seed):
+        return random.Random(seed)
+
+    def sweep(seconds, start_hz, end_hz, decay):
+        count = int(seconds * rate)
+        out, phase = [], 0.0
+        for index in range(count):
+            t = index / rate
+            frequency = end_hz + (start_hz - end_hz) * math.exp(-t / 0.032)
+            phase += 2 * math.pi * frequency / rate
+            out.append(math.sin(phase) * math.exp(-t / decay))
+        return out
+
+    def noise(seconds, cutoff_share, decay, seed):
+        count = int(seconds * rate)
+        source = rng(seed)
+        raw = [source.uniform(-1.0, 1.0) for _ in range(count)]
+        # a one-pole high-pass: bright for a hat, mid for a snare
+        alpha = cutoff_share
+        out, previous_in, previous_out = [], 0.0, 0.0
+        for value in raw:
+            previous_out = alpha * (previous_out + value - previous_in)
+            previous_in = value
+            out.append(previous_out * math.exp(-(len(out) / rate) / decay))
+        return out
+
+    kick = sweep(0.28, 150.0, 45.0, 0.085)
+    snare = [a * 0.7 + b for a, b in zip(noise(0.24, 0.35, 0.05, 3),
+                                         sweep(0.24, 210.0, 170.0, 0.035))]
+    hat = noise(0.08, 0.85, 0.018, 7)
+    tom = sweep(0.30, 240.0, 150.0, 0.10)
+    crash = noise(0.9, 0.75, 0.32, 11)
+    ride = noise(0.6, 0.82, 0.22, 17)
+
+    waves = []
+    for signal in (kick, snare, hat, tom, crash, ride):
+        peak = max(abs(value) for value in signal) or 1.0
+        pcm = bytes(int(round(127 + 100 * value / peak)) for value in signal)
+        # a sample is stored in 4-byte words: trim to a whole word
+        pcm = pcm[:len(pcm) - len(pcm) % 4]
+        waves.append(_swav(pcm, 0, rate, looped=False, samples=len(pcm)))
+    header = 0x3C + len(waves) * 4
+    offsets, position = [], header
+    for wave in waves:
+        offsets.append(position)
+        position += len(wave)
+    swar = bytearray(_std_header(b"SWAR", position))
+    swar += b"DATA" + struct.pack("<I", position - 0x10) + b"\x00" * 32
+    swar += struct.pack("<I", len(waves))
+    for offset in offsets:
+        swar += struct.pack("<I", offset)
+    swar += b"".join(waves)
+    return bytes(swar)
+
+
+def build_drum_kit_rom(path: str, keys=range(60, 66)) -> str:
+    """A ROM whose kit is keyed 60..65 and holds real drum shapes.
+
+    The key numbers are the game's own business — nothing about key 60 says
+    "kick". A converter that reads the *sound* gets a kick, a snare, a hat, a tom
+    and a crash; one that reads the key numbers gets a bongo and a conga.
+    """
+    keys = list(keys)
+    sdat = build_sdat(sequences=[("BGM_KIT", build_drum_sseq(tuple(keys)))],
+                      sbnk=build_kit_sbnk(keys=keys),
+                      swar=_drum_shapes())
+    return build_rom(path, sdat)
+
+
 def build_own_key_kit_rom(path: str, keys=range(60, 72)) -> str:
     """A ROM whose kit is keyed the game's own way, nowhere near GM's 35..81.
 

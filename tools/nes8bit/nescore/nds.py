@@ -25,6 +25,7 @@ import struct
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
+from . import gm
 from .model import Note, Song
 
 TICKS_PER_QUARTER = 48
@@ -955,6 +956,21 @@ def drum_programs(sbnk: bytes, wave_archive: int = 0) -> Dict[int, List[int]]:
     return kits
 
 
+def piece_name(keys: List[int], key: int) -> Optional[str]:
+    """Which kit piece a key is: "kick", "snare", "tom_low", "hat", …
+
+    A kit keyed the way General MIDI keys drums is read directly; one the game
+    keyed its own way is read by key order (lowest key is the bass drum). The name
+    is what the chip and the sampled drums play — the note's own key never changes.
+    """
+    if not keys:
+        return None
+    in_range = sum(1 for candidate in keys if 35 <= candidate <= 81)
+    piece = key if in_range * 2 >= len(keys) else \
+        _GM_PIECES[keys.index(key) % len(_GM_PIECES)]
+    return gm.percussion(piece)[1]
+
+
 def mark_percussion(song: Song, kits: Dict[int, List[int]]) -> int:
     """Give drum tracks their role, using what the bank says they are.
 
@@ -978,6 +994,7 @@ def mark_percussion(song: Song, kits: Dict[int, List[int]]) -> int:
         in_range = sum(1 for key in keys if 35 <= key <= 81)
         note.drum_piece = (note.pitch if in_range * 2 >= len(keys)
                            else _GM_PIECES[keys.index(note.pitch) % len(_GM_PIECES)])
+        note.drum = gm.percussion(note.drum_piece)[1]
         marked += 1
     return marked
 

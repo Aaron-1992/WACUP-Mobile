@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import analyze, chips, importers, mix, sampled
+from . import analyze, chips, importers, mix, sampled, samples
 from .arrange import Options, Stats, arrange
 from .render import RenderOptions, render, wav_bytes
 from .vgmout import write_vgm
@@ -36,6 +36,7 @@ class Settings:
     sequence: str = ""              # which song inside a bank archive (DS ROMs)
     bank: str = ""                  # which instrument bank to take with it
     samples: bool = False           # play the game's own instruments, not a chip
+    builtin_drums: bool = False     # ignore the bank's own kit, use the synth one
 
     def chips(self):
         """The extension chips that are switched on, in display order."""
@@ -117,6 +118,7 @@ class Result:
     waves: Dict[str, int] = field(default_factory=dict)    # PC Engine wave RAM
     advice: List[str] = field(default_factory=list)        # why it may sound odd
     samples_mode: bool = False      # rendered on the game's samples, not a chip
+    drum_source: str = ""           # which kit the drums came from
 
 
 def output_name(source: str, settings: Settings, label: str = "") -> str:
@@ -230,8 +232,13 @@ def convert_file(source: str, settings: Settings,
     for note in notes:
         grouped.setdefault(note.channel, []).append(note)
 
-    report("Rendering %d notes" % len(notes), 0.45)
+    report("Choosing the drums", 0.4)
     render_options = settings.render_options()
+    render_options.drum_kit, result.drum_source = drum_kit(
+        source, notes, sampled_drums=settings.sampled_drums,
+        builtin_drums=settings.builtin_drums)
+
+    report("Rendering %d notes" % len(notes), 0.45)
     pcm, stems, duration = render(notes, channels, render_options, grouped)
     result.stems = stems
     report("Writing the WAV", 0.9)
@@ -281,6 +288,61 @@ def convert_file(source: str, settings: Settings,
         result.advice = []
     report("Done", 1.0)
     return result
+
+
+def drum_kit(source: str, notes, sampled_drums: bool = True,
+             builtin_drums: bool = False):
+    """Which percussion to play: the game's own, or the built-in kit.
+
+    A DS ROM's bank holds the drum samples the game itself uses — a kick, a snare,
+    hats, toms, cymbals, one per key. Playing those makes a converted song sound
+    like *that game*, rather than like every other song converted here. A MIDI file
+    has no bank, and a bank can be missing a piece, so the built-in kit fills the
+    gaps. With sampled drums switched off this returns nothing at all: the drums
+    fall back to the noise channel, which is what that switch is for.
+    """
+    carrying = importers.bank_of(source)
+    measured = None
+    if carrying is not None:
+        try:
+            measured = samples.from_bank(*carrying)
+        except Exception:
+            measured = None
+    if measured is not None:
+        # What each key *is* comes from the sample, so it is worth knowing even
+        # when the hits will be played by the built-in kit or the noise channel.
+        _retarget_drums(notes, measured)
+    if not sampled_drums:
+        return None, "the noise channel (sampled drums are switched off)"
+    if builtin_drums:
+        return samples.builtin(), "the built-in kit (the game's own kit is switched off)"
+    if measured is None:
+        if carrying is None:
+            return None, samples.builtin().source
+        return None, "the built-in kit (this file's bank has no drum kit in it)"
+    return samples.merged_with_builtin(measured), measured.source
+
+
+def _retarget_drums(notes, kit: "samples.Kit") -> None:
+    """Point each hit at the piece its *sample* turned out to be.
+
+    The arranger names a hit from the key the file wrote, and a game's kit is keyed
+    its own way, so that name is a guess. The kit measured every sample, so this is
+    where the guess is corrected: key 60 that measured as a kick is played as the
+    kick. The noise-channel fallback is corrected with it, so switching sampled
+    drums off does not undo the fix.
+    """
+    if not kit.key_map:
+        return
+    for note in notes:
+        if note.role != "drum":
+            continue
+        key = note.bank_pitch if note.bank_pitch >= 0 else note.pitch
+        name = kit.key_map.get(key)
+        if not name:
+            continue
+        note.drum = name
+        note.noise_period, note.noise_short = samples.noise_for(name)
 
 
 def _convert_samples(source: str, song, analysis, settings: "Settings",
@@ -411,4 +473,8 @@ def _advice(result: Result, stats, grouped, stems, duration: float,
     if duration < 3.0:
         lines.append("only %.1f s of music — a jingle or a sound effect?"
                      % duration)
+    # last, because it is information rather than a problem: which kit the drums
+    # came from, so "it always sounds the same" has an answer on screen
+    if getattr(result, "drum_source", ""):
+        lines.append("drums: %s" % result.drum_source)
     return lines
